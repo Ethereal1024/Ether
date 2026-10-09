@@ -1,0 +1,47 @@
+Ether — third-party notices and what we do NOT redistribute
+=================================================================
+
+This application itself is MIT-licensed.
+
+Tablet-side relay: `resources/android/arm64-v8a/udp2tcp`
+--------------------------------------------------------
+Our own program, built from `udp2tcp.c` in this repository with the Android NDK
+(`aarch64-linux-android26-clang`).  Statically linked against nothing but
+Bionic; it is pushed to `/data/local/tmp` at run time and removed by the app's
+cleanup.  No Google code is included in it.
+
+adb / platform-tools: downloaded, not shipped
+---------------------------------------------
+The app never bundles or installs adb.  If no usable adb is found on the machine
+(`$ADB`, then `$PATH`, then the standard Android SDK locations — see
+`src/main/platform.ts`), it downloads `platform-tools-latest-{linux,darwin,windows}.zip`
+from `dl.google.com` into **its own data directory** and uses that copy for its
+own child processes only.  That download is covered by the Android SDK Terms of
+Service / the Android Software Development Kit License Agreement, which is why it
+is kept out of this distribution and out of the system PATH.  Deleting the app's
+data directory removes it completely.
+
+Electron, TypeScript, electron-builder: build-time dependencies
+--------------------------------------------------------------
+Declared as `devDependencies` in `package.json`; Electron's own notices ship with
+whatever package electron-builder produces.  There are no third-party runtime
+dependencies: the ZIP reader (`src/main/zip.ts`), the relay, and the CLI are all
+plain Node standard library.
+
+Lucide icons: vendored source, not a dependency
+-----------------------------------------------
+Six icons in `src/renderer/index.html` (`chevron-right`, `chevron-left`,
+`gauge`, `copy`, `check`, `refresh-cw`) come from [Lucide](https://lucide.dev)
+(package `lucide-static`
+v1.52.0, ISC licence, © Lucide Contributors).  They are inlined as `<svg>`
+markup in the HTML: there is no npm dependency, no runtime fetch, and the
+renderer's Content-Security-Policy stays `default-src 'none'`.  Replace the
+paths below to rebuild them if you ever need to:
+
+  npm pack lucide-static@1.52.0   # icons/chevron-right.svg etc.
+  Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part
+  of Feather (MIT).  All other copyright (c) for Lucide are held by Lucide
+  Contributors 2022.  Licensed under the ISC Licence.
+
+Sunshine and Moonlight are neither bundled nor modified.  This app only sets up a
+transport for the versions the user already has installed.

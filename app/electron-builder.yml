@@ -1,0 +1,65 @@
+# electron-builder.yml — packaging only (§13.4 #1, M4).
+#
+# Two things are load-bearing here:
+#   1. `files` must ship `src/main/preload.cjs`.  It is hand-written CommonJS and
+#      is not compiled by tsc, so nothing else would carry it into the asar — and
+#      without it the window has no IPC surface at all.
+#   2. `extraResources` copies `resources/` to the *root* of process.resourcesPath,
+#      which is exactly where `index.ts` looks for the tablet ELF when packaged.
+#
+# Package identity: the `deb` target (fpm) refuses to build without a Homepage URL
+# and a maintainer, and package.json now carries both.  The homepage/repository/
+# bugs URLs point at the real project
+# (https://github.com/Ethereal1024/Ether).  The maintainer email stays
+# `dev@ether.invalid` on purpose: `.invalid` is reserved by RFC 2606 and can
+# never receive mail, which is honest — there is no public mailbox behind this
+# project, and a real-looking address would just swallow bug reports.
+appId: dev.ether.app
+productName: Ether
+copyright: MIT-licensed; ships no Google code (platform-tools is downloaded at runtime)
+
+directories:
+  output: release
+  buildResources: build
+
+# One window, one relay, no native modules: the package is small on purpose.
+npmRebuild: false
+asar: true
+
+files:
+  - package.json
+  - "dist/**/*.js"
+  - "!dist/test/**"          # the unit suites are not part of the app
+  - "bin/**"
+  - src/main/preload.cjs
+  - src/renderer/**
+
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - "**/*"
+      - "!**/*.md"
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Utility
+  synopsis: One-click wired (USB/adb) Moonlight tunnel
+
+mac:
+  target: dmg
+  category: public.app-category.utilities
+
+win:
+  target: nsis
+
+# Windows is the one platform where an installer can silently turn "no admin" into
+# "admin needed", so it is pinned here rather than left to the defaults: per-user
+# install, and NSIS may never pop a UAC prompt (that is a §3.1 promise, and
+# test/noadmin.test.ts fails if this block loses either line).
+nsis:
+  perMachine: false
+  allowElevation: false
+  oneClick: true

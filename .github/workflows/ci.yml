@@ -1,0 +1,76 @@
+# Ether's continuous tests.  release.yml is what ships artifacts; this is what
+# says whether main is green.
+#
+# The suite is written against dist/, so `npm test` runs tsc first (pretest).
+# The one thing worth knowing before reading the matrix: the suite has three
+# kinds of platform-gated case, and they do not all skip for the same reason.
+#
+#   interop.test.ts   3 cases need the *C* relay (c-relay/udp2tcp) built.  POSIX
+#                     only: it is a POSIX-socket program with no Windows build.
+#   posixOnly         tests that exec a `sh` adb stub — meaningless on Windows.
+#   linuxOnly         tests that read /proc/<pid>/cmdline to watch a live service.
+#
+# So `linux` is the only row that can demand "0 skipped": there the C relay
+# builds and both /proc and POSIX sh exist.  macOS builds the relay and runs the
+# posixOnly cases but must skip the linuxOnly ones; Windows skips both groups.
+# ALLOW_SKIPS=1 relaxes exactly the skip assertion and never the failure one —
+# a red suite is red on every platform.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A branch's previous run is irrelevant once a new commit lands; cancel it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide whether the other two pass.
+      fail-fast: false
+      matrix:
+        include:
+          # The reference row: relay built, nothing may skip.
+          - os: ubuntu-latest
+            allow_skips: ""
+          # No /proc/<pid>/cmdline: the linuxOnly service cases skip by design.
+          - os: macos-latest
+            allow_skips: "1"
+          # No POSIX sh stub, no /proc, no C relay build.
+          - os: windows-latest
+            allow_skips: "1"
+    env:
+      ALLOW_SKIPS: ${{ matrix.allow_skips }}
+      # The slow, flaky part of any Electron job is downloading electron itself;
+      # same mirror the release jobs use.
+      ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app deps
+        working-directory: app
+        run: npm ci
+
+      # bash on every runner, Windows included (Git Bash ships with the image):
+      # run-tests.sh is the same script the release pipeline gates on, and it
+      # builds the relay with cc before testing so the interop cases cannot
+      # vanish into a green run.
+      - name: Tests
+        shell: bash
+        run: bash scripts/run-tests.sh

@@ -1,0 +1,33 @@
+{
+  "name": "ether",
+  "productName": "Ether",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-click wired (adb) channel between stock Sunshine and stock Moonlight",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/Ethereal1024/Ether.git" },
+  "homepage": "https://github.com/Ethereal1024/Ether",
+  "bugs": { "url": "https://github.com/Ethereal1024/Ether/issues" },
+  "author": { "name": "Ethereal1024", "email": "dev@ether.invalid" },
+  "type": "module",
+  "main": "dist/src/main/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json -w",
+    "test": "node --test --test-concurrency=1 \"dist/test/*.test.js\"",
+    "pretest": "npm run build",
+    "selftest": "node bin/cli.mjs --selftest",
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:win": "npm run build && electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,211 @@
+# Ether's desktop releases, built on a tag push (vX.Y.Z) and attached to the
+# GitHub release for that tag.
+#
+#   AppImage + deb : Linux x86_64   (ubuntu-latest)
+#   dmg            : macOS arm64    (macos-latest)
+#   NSIS .exe      : Windows x64    (windows-latest)
+#
+# All three are UNSIGNED — this project has no Developer ID and no Authenticode
+# certificate, and saying so here is the point: a signed-looking release that is
+# not signed is worse than one that admits it.
+#   macOS: Gatekeeper blocks the first launch. On macOS 15+ the right-click ->
+#          Open bypass is gone and the notice misreports the app as "damaged";
+#          clear it once with  xattr -cr /Applications/Ether.app
+#   win  : SmartScreen warns on the first run ("Windows protected your PC" ->
+#          More info -> Run anyway). The installer itself never elevates —
+#          nsisi.perMachine/allowElevation are pinned in electron-builder.yml and
+#          test/noadmin.test.ts fails if either line moves.
+#   linux: nothing to bypass; dpkg -i the deb or chmod +x the AppImage.
+#
+# Why three runners and not one: electron-builder cannot cross-build two of
+# these — the dmg needs macOS-only tooling, and the Windows installer is built
+# where Windows is. The jobs are therefore thin: checkout, npm ci, one
+# electron-builder call, attach.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# softprops/action-gh-release writes to the release, so the job token needs
+# write access to contents (the default is read-only for a fresh repo).
+permissions:
+  contents: write
+
+env:
+  # electron and the electron-builder helper binaries are the slow, flaky part of
+  # these jobs; npmmirror serves both.  Point them at the GitHub upstreams if you
+  # would rather not use a third-party mirror.
+  ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+  ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+
+jobs:
+  # Every packaging job needs: this one.  A release that ships an installer built
+  # from a suite that was not run is the failure mode this job exists to prevent
+  # — and the three platform runs are the only place the app is exercised on
+  # macOS/Windows at all, so they must not start before that is known.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # The tag names the release and the version is what the artifacts say, so a
+      # tag that disagrees with app/package.json ships `Ether-0.1.0.dmg` under
+      # `v0.2.0` and nothing about the build looks wrong.  Fail here instead.
+      - name: The tag and app/package.json must agree
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          have="$(node -p "require('./app/package.json').version")"
+          echo "tag $GITHUB_REF_NAME -> $tag, package.json -> $have"
+          [ "$tag" = "$have" ] || { echo "::error::tag and app/package.json disagree"; exit 1; }
+
+      # Packaging traps that fail *silently*: a missing icon is not an error to
+      # electron-builder (it falls back to the stock Electron icon, so the .exe and
+      # the .dmg come out looking like a different program), and a missing
+      # extraResource is only a warning at copy time — the deb then installs and
+      # the app cannot push the tablet relay, which is the whole product.
+      - name: The icon is present and big enough to derive every platform icon
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "app/build/icon.png";
+            const b = fs.readFileSync(p);
+            const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
+            if (w < 512 || h < 512) { console.error(`${p} is ${w}x${h}; electron-builder needs >= 512x512 (ideally 1024)`); process.exit(1); }
+            console.log(`icon ${w}x${h}`);
+          '
+
+      - name: The tablet relay is in the package (extraResources -> resourcesPath)
+        run: |
+          set -euo pipefail
+          f=app/resources/android/arm64-v8a/udp2tcp
+          [ -x "$f" ] || [ -f "$f" ] || { echo "::error::$f is missing; the app has nothing to push to the tablet"; exit 1; }
+          ls -l "$f"
+
+      - name: Install app deps
+        working-directory: app
+        run: npm ci
+
+      # Builds the host C relay with cc, then runs the suite and refuses skips:
+      # three interop cases only run when c-relay/udp2tcp exists.
+      - name: Tests
+        run: bash scripts/run-tests.sh
+
+  # This job also *creates* the release (the first job to attach a file does); the
+  # other two only add to it, which is why they `needs:` this one instead of
+  # racing it — two jobs creating the same release is a 422.
+  linux:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app deps
+        working-directory: app
+        run: npm ci
+
+      - name: Build AppImage + deb
+        working-directory: app
+        run: npm run dist:linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ether-linux
+          path: |
+            app/release/*.AppImage
+            app/release/*.deb
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/release/*.AppImage
+            app/release/*.deb
+          # The unsigned caveats are the first thing a downloader needs.
+          body: |
+            Unsigned builds. macOS: first launch is blocked by Gatekeeper — `xattr -cr /Applications/Ether.app`.
+            Windows: SmartScreen warns — More info -> Run anyway (the installer never asks for admin).
+
+  mac:
+    runs-on: macos-latest
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app deps
+        working-directory: app
+        run: npm ci
+
+      # CSC_IDENTITY_AUTO_DISCOVERY=false: do not go looking for a signing
+      # identity.  Without it electron-builder still produces the dmg, but a
+      # runner that happens to have a certificate in its keychain would sign
+      # with it, and two machines would then produce different bytes for the
+      # same tag.  Unsigned is the one documented, reproducible answer.
+      - name: Build dmg (unsigned)
+        working-directory: app
+        run: npm run dist:mac
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ether-mac
+          path: app/release/*.dmg
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/release/*.dmg
+
+  win:
+    runs-on: windows-latest
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app deps
+        working-directory: app
+        run: npm ci
+
+      - name: Build NSIS installer (unsigned)
+        working-directory: app
+        run: npm run dist:win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ether-win
+          path: app/release/*.exe
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/release/*.exe
