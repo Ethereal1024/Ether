@@ -58,7 +58,7 @@ win:
 # Windows is the one platform where an installer can silently turn "no admin" into
 # "admin needed", so it is pinned here rather than left to the defaults: per-user
 # install, and NSIS may never pop a UAC prompt (that is a §3.1 promise, and
-# test/noadmin.test.ts fails if this block loses either line).
+# test/escalation.test.ts fails if this block loses either line).
 nsis:
   perMachine: false
   allowElevation: false

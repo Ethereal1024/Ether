@@ -121,7 +121,9 @@ export const ANDROID_VENDOR_IDS: readonly string[] = [
   '05c6', '2916', '19d2', '0b05', '2207', '2b0b', '22d9', '0e8d',
 ];
 
-/** Where a distro keeps udev rules.  Read-only: nothing here ever writes one. */
+/** Where a distro keeps udev rules.  This file only ever *reads* them: writing one is
+ * privileged work, so it belongs to `elevate.ts` (which is the only module that declares
+ * what this app does as an administrator). */
 export const RULE_DIRS: readonly string[] = [
   '/etc/udev/rules.d',
   '/run/udev/rules.d',
@@ -137,9 +139,9 @@ function normalizeVid(s: string): string | undefined {
 }
 
 /**
- * The §3.4 row-3 action: the two commands a user pastes, and nothing else.  The
- * sentence that introduces them is `t('noPermissions')`, so this stays
- * language-neutral and `controller.ts` puts it straight into `hint`.
+ * The two commands a user would paste if they would rather not let the app do it.  The
+ * sentence that introduces them is `t('noPermissions')`, so this stays language-neutral
+ * and `controller.ts` puts it straight into `hint`.
  *
  * The vendor id is a parameter on purpose: `<VENDOR_ID>` was a placeholder, and a hint
  * the user has to edit is not a hint (§3.4).  A caller that cannot determine the
@@ -148,8 +150,13 @@ function normalizeVid(s: string): string | undefined {
  * `MODE="0666"` alone is deliberate — a `GROUP=` clause would point at a group
  * that does not exist on every distro, while the mode bit is what adb needs.
  *
- * Nothing in this repository *runs* these commands; the app prints them and the
- * user decides.  `test/noadmin.test.ts` fails the build if that ever changes.
+ * These are a *fallback*: the app installs the same rule itself, through the desktop's
+ * own consent prompt (`elevate.ts`, op `grantDeviceAccess`), so no user is ever asked to
+ * open a terminal.  What this function exists for is the machine where that prompt
+ * cannot be raised at all (no `pkexec`, no desktop session) or where the user dismissed
+ * it — there, one command to paste beats a dead end.  `/etc/udev/rules.d` appears here
+ * and in `elevate.ts` and nowhere else, so the file the app writes and the file it prints
+ * can never drift apart.
  */
 export function udevHint(vendorId: string): string {
   const vid = normalizeVid(vendorId);
@@ -238,36 +245,46 @@ export interface UdevAction {
   hint?: string;
 }
 
+export interface UdevProbe {
+  serial?: string;
+  env: NodeJS.ProcessEnv;
+  sysRoot?: string;
+  lsusb?: () => string;
+}
+
+/**
+ * The USB vendor id behind `serial`, or `undefined` when it cannot be determined.  Both
+ * the printed command and the elevated rule are built from this one answer, so "which
+ * device is it" is never worked out twice.  `ETHER_UDEV_VID` (`<vid>` | `unknown`) pins
+ * it for tests.
+ */
+export function udevVendorId(o: UdevProbe): string | undefined {
+  const forced = o.env.ETHER_UDEV_VID?.trim().toLowerCase();
+  if (forced === 'unknown') return undefined;
+  if (forced) return normalizeVid(forced);
+  return (
+    vendorIdFromSysfs(o.sysRoot ?? '/sys/bus/usb/devices', o.serial ?? '') ??
+    vendorIdFromLsusb((o.lsusb ?? lsusbDump)())
+  );
+}
+
 /**
  * What to tell the user when the OS refuses the device (Linux, §3.4 row 3).
  *
  *   1. a rule for this vendor is already installed → the remaining step is a
  *      replug/relogin, and no privileged command is ever shown again;
- *   2. vendor known, not ruled → the two paste-able commands;
+ *   2. vendor known, not ruled → the fix the app runs itself (`elevate.ts`, op
+ *      `grantDeviceAccess`), with these two commands as the fallback text for the
+ *      machine that cannot raise a consent prompt at all;
  *   3. vendor undeterminable → the sentence alone.  Guessing would hand the user a
  *      rule for the wrong device, i.e. a fix that silently does nothing.
  *
- * `ETHER_UDEV_VID` (`<vid>` | `unknown`) and `ETHER_UDEV_RULE`
- * (`present` | `missing`) pin the probe for tests: the real answer depends on the
- * machine (this one already has `17ef` in `/etc/udev/rules.d`), and a test that
- * changes meaning when a tablet is plugged in is worse than no test.
+ * `ETHER_UDEV_RULE` (`present` | `missing`) pins the probe for tests: the real answer
+ * depends on the machine (this one already has `17ef` in `/etc/udev/rules.d`), and a
+ * test that changes meaning when a tablet is plugged in is worse than no test.
  */
-export function udevAction(o: {
-  serial?: string;
-  env: NodeJS.ProcessEnv;
-  sysRoot?: string;
-  ruleDirs?: readonly string[];
-  lsusb?: () => string;
-}): UdevAction {
-  const forced = o.env.ETHER_UDEV_VID?.trim().toLowerCase();
-  let vid: string | undefined;
-  if (forced === 'unknown') vid = undefined;
-  else if (forced) vid = normalizeVid(forced);
-  else {
-    vid =
-      vendorIdFromSysfs(o.sysRoot ?? '/sys/bus/usb/devices', o.serial ?? '') ??
-      vendorIdFromLsusb((o.lsusb ?? lsusbDump)());
-  }
+export function udevAction(o: UdevProbe & { ruleDirs?: readonly string[] }): UdevAction {
+  const vid = udevVendorId(o);
   if (!vid) return { key: 'noPermissions' };
 
   const forcedRule = o.env.ETHER_UDEV_RULE?.trim().toLowerCase();

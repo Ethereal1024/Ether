@@ -9,6 +9,7 @@ import { mkdir } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import path from 'node:path';
 import { Adb, AdbError, type Device } from './adb.js';
+import type { FixKind, FixResult } from './elevate.js';
 import { t, type MsgKey } from './messages.js';
 import { currentPlat, udevAction, userDataDir, type Plat } from './platform.js';
 import {
@@ -43,6 +44,20 @@ export interface Status {
   /** Which sentence `message` is (lets a test assert on the catalogue, not the prose). */
   messageKey?: MsgKey;
   hint?: string;
+  /**
+   * The raised-rights remedy this state has, if any.  Only the Electron payload carries
+   * it: `bin/cli.mjs` prints a frozen key set that must not grow one (§13.8), and the
+   * headless path has nobody to press a button.  `controller.ts` fills it for the one
+   * state it owns (a device the OS denies); the shell adds the remedies it probes for
+   * itself (a missing USB driver, a desktop with no tray).
+   */
+  fix?: FixKind;
+  /** What the last press of that remedy ended in.  Electron-only, like `fix`, and
+   * cleared by the next verb rather than by the next status push. */
+  fixResult?: FixResult;
+  /** Whether this desktop has anywhere to *put* the tray icon, and whether the app can
+   * install one.  Electron-only, like `fix`: it is a fact about the session. */
+  tray?: { ok: boolean; fixable: boolean };
   /** The verified UDP round trip in Mbps, if one was taken. The window draws it as a
    * figure of its own; the §13.8 JSON (`bin/cli.mjs`) does not print it. */
   mbps?: number;
@@ -84,7 +99,7 @@ export class Controller {
   private listeners: Array<(s: Status) => void> = [];
 
   /** Last device/message we derived without a tunnel running. */
-  private last: Pick<Status, 'state' | 'device' | 'message' | 'messageKey' | 'hint'> = {
+  private last: Pick<Status, 'state' | 'device' | 'message' | 'messageKey' | 'hint' | 'fix'> = {
     state: 'idle',
     message: '',
   };
@@ -187,6 +202,9 @@ export class Controller {
       stats: s.stats,
       message: s.message,
       hint: s.hint,
+      // The remedy is a fact about the last scan, not about the tunnel, so it travels
+      // with `hint` (see the `idle` branch): the tunnel has no idea what a udev rule is.
+      fix: this.last.fix,
       mbps: s.mbps,
       logs: [...s.logs, ...this.logs].slice(-LOG_LIMIT),
     };
@@ -242,6 +260,7 @@ export class Controller {
           let key: MsgKey =
             dev.state === 'unauthorized' ? 'unauthorized' : dev.state === 'no permissions' ? 'noPermissions' : 'offline';
           let hint: string | undefined;
+          let fix: Status['fix'];
           if (dev.state === 'no permissions') {
             // §3.4 row 3 is the only state whose action is privileged, and the only
             // one where the sentence depends on what the machine already has: a rule
@@ -250,6 +269,12 @@ export class Controller {
             const action = udevAction({ serial: dev.serial, env: this.opts.env ?? process.env });
             key = action.key;
             hint = action.hint;
+            // The elevated half of that same fix: the app installs the very rule it
+            // would otherwise print, through the desktop's own consent prompt.  No
+            // vendor id means there is no rule to write, and a rule already in place
+            // means nothing is left to install — both are "no button", never "a button
+            // that silently does nothing".
+            fix = action.hint ? 'grantDeviceAccess' : undefined;
           }
           this.last = {
             state: 'error',
@@ -259,6 +284,7 @@ export class Controller {
             // The renderer keys the copyable block off messageKey + hint, and the
             // CLI prints `hint`: no hint means no block, by design.
             hint,
+            fix,
           };
         } else {
           // Usable device: the useful next thing to know is whether there is

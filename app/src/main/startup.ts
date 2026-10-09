@@ -1,21 +1,23 @@
 // startup.ts — the two things this app is allowed to do before the user asks: nothing
 // at all, unless they said so.  It owns
 //
-//   * the settings we persist (`settings.json`, next to state.json in the data dir);
+//   * the settings we persist (`settings.json`, next to state.json in the data dir) —
+//     connect on launch, and whether closing the window keeps the link up;
 //   * the desktop's own way of opening an app with the session (a per-user startup
 //     entry on Linux; macOS and Windows hand that to Electron, which is why the
-//     platform split lives in the shell).
+//     platform split lives in the shell);
+//   * the one decision the shell makes when the close button is pressed (below).
 //
-// Electron-free on purpose, like controller.ts: the decision below is testable
+// Electron-free on purpose, like controller.ts: the decisions below are testable
 // headlessly.  The Linux half is a plain file in the user's own config directory — no
-// admin, no /etc, no registry, no PATH edit.  `test/noadmin.test.ts` fails the build
+// admin, no /etc, no registry, no PATH edit.  `test/escalation.test.ts` fails the build
 // if that stops being true, and it is the reason this is the only file that may name
 // that directory at all.
 //
 // The launch-at-login switch is deliberately *not* stored here.  Its truth is the OS
 // (`app.getLoginItemSettings()`, or the entry file itself): the moment the user
 // deletes the entry by hand, a remembered copy would be a checkbox that lies.  Only
-// `autoConnect` is a setting we own.
+// `autoConnect` and `keepRunning` are settings we own.
 
 import { readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -27,10 +29,15 @@ import path from 'node:path';
 export interface Settings {
   /** Dial the wired link as soon as the app is up, when a usable device is there. */
   autoConnect: boolean;
+  /** Keep the wired link up when the window is closed: the app stays alive, behind its
+   * tray icon (or minimised to the taskbar where the desktop has no tray).  On by
+   * default, because a link the user started is not something closing a window should
+   * silently drop. */
+  keepRunning: boolean;
 }
 
 export const SETTINGS_NAME = 'settings.json';
-export const DEFAULT_SETTINGS: Settings = { autoConnect: false };
+export const DEFAULT_SETTINGS: Settings = { autoConnect: false, keepRunning: true };
 
 export function settingsPath(dataDir: string): string {
   return path.join(dataDir, SETTINGS_NAME);
@@ -39,12 +46,13 @@ export function settingsPath(dataDir: string): string {
 /**
  * A settings file is a hint about what *we* wrote, so it is re-validated rather than
  * trusted (the same rule state.json follows): a truncated or hand-edited file falls
- * back to the default, never to a crash and never to `true`.  In particular a string
- * `"yes"` is not a yes — only the boolean is.
+ * back to the defaults, never to a crash.  `autoConnect` is the one setting whose wrong
+ * default would *do* something (dial a link nobody asked for), so only the boolean is a
+ * yes there; `keepRunning` defaults to on, so only an explicit `false` turns it off.
  */
 export function normalizeSettings(v: unknown): Settings {
   const o = (v ?? {}) as Partial<Settings>;
-  return { autoConnect: o.autoConnect === true };
+  return { autoConnect: o.autoConnect === true, keepRunning: o.keepRunning !== false };
 }
 
 export async function readSettings(dataDir: string): Promise<Settings> {
@@ -178,4 +186,29 @@ export interface AutoConnectStatus {
  */
 export function shouldAutoConnect(settings: Settings, status: AutoConnectStatus): boolean {
   return settings.autoConnect === true && status.state === 'idle' && status.device?.state === 'device';
+}
+
+// ── the other decision the shell asks for: what closing the window means ────
+
+/** What the shell does with the close button. */
+export type CloseAction = 'close' | 'hide' | 'minimize';
+
+/**
+ * Closing the window must not drop the wired link, so with `keepRunning` on the window is
+ * never really closed: it goes to the tray when there is one, and to the taskbar when
+ * there is not.
+ *
+ * The fallback matters as much as the tray.  Hiding a window on a desktop with no tray
+ * would leave a running app with no door at all — the user could neither see the link
+ * they are keeping nor stop it, which is exactly the surprise this app avoids.  A
+ * minimised window keeps the link up *and* stays reachable, so on a tray-less desktop
+ * that is the honest answer, and it is a decision, not an accident.
+ *
+ * A quit (`quitting`, or the user turning the switch off) is passed straight through:
+ * `before-quit` teardown is what guarantees the machine is left as it was found.
+ */
+export function windowCloseAction(o: { keepRunning?: boolean; quitting?: boolean; tray?: boolean }): CloseAction {
+  if (o.quitting === true) return 'close';
+  if (o.keepRunning !== true) return 'close';
+  return o.tray === true ? 'hide' : 'minimize';
 }

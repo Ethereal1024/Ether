@@ -9,9 +9,9 @@
 //     to someone else's debugging session.
 
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
-import https from 'node:https';
+import { chmod, mkdir, readFile, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { downloadToFile } from './download.js';
 import { adbExeName, findAdb, type Plat } from './platform.js';
 import { extractZip } from './zip.js';
 
@@ -106,47 +106,6 @@ function platformToolsUrl(plat: Plat): string {
   return `https://dl.google.com/android/repository/platform-tools-latest-${tag}.zip`;
 }
 
-function download(url: string, dest: string, log: (l: string) => void, redirects = 0): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (redirects > 5) {
-      reject(new AdbError('too many redirects while downloading platform-tools', 'download'));
-      return;
-    }
-    https
-      .get(url, (res) => {
-        const code = res.statusCode ?? 0;
-        if (code >= 300 && code < 400 && res.headers.location) {
-          res.resume();
-          resolve(download(new URL(res.headers.location, url).toString(), dest, log, redirects + 1));
-          return;
-        }
-        if (code !== 200) {
-          res.resume();
-          reject(new AdbError(`platform-tools download failed: HTTP ${code}`, 'download'));
-          return;
-        }
-        const chunks: Buffer[] = [];
-        let total = 0;
-        res.on('data', (c: Buffer) => {
-          chunks.push(c);
-          total += c.length;
-          if (total % (4 << 20) < c.length) log(`[adb] downloading platform-tools… ${(total >> 20)} MiB`);
-        });
-        res.on('error', reject);
-        res.on('end', async () => {
-          try {
-            await writeFile(dest, Buffer.concat(chunks));
-            log(`[adb] downloaded ${(total >> 20)} MiB -> ${dest}`);
-            resolve();
-          } catch (e) {
-            reject(e);
-          }
-        });
-      })
-      .on('error', (e) => reject(new AdbError(`platform-tools download failed: ${e.message}`, 'download')));
-  });
-}
-
 export class Adb {
   readonly exe: string;
   readonly version: string;
@@ -187,7 +146,15 @@ export class Adb {
   private static async downloadAndInstall(o: AdbOpts): Promise<string> {
     await mkdir(o.dataDir, { recursive: true });
     const zipPath = path.join(o.dataDir, `platform-tools-latest-${o.plat}.zip`);
-    await download(platformToolsUrl(o.plat), zipPath, o.log);
+    // The fetcher is shared with the Windows driver path (download.ts): one place that
+    // follows redirects, times out and deletes a partial file, so neither caller can be
+    // the one that forgot.  The log line keeps its `[adb]` prefix — the other caller is
+    // a different subject, and mixing them is how a log stops being readable.
+    try {
+      await downloadToFile(platformToolsUrl(o.plat), zipPath, (l) => o.log(`[adb] ${l}`), 'platform-tools');
+    } catch (e) {
+      throw new AdbError(`platform-tools download failed: ${(e as Error).message}`, 'download');
+    }
 
     const buf = await readFile(zipPath);
     const staging = path.join(o.dataDir, 'platform-tools.staging');

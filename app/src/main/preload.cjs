@@ -22,6 +22,14 @@ contextBridge.exposeInMainWorld('ether', {
    */
   setSetting: (o) => ipcRenderer.invoke('set-setting', o),
   /**
+   * The one remedy the current state has — the udev rule, the tray support, the USB
+   * driver — installed through the desktop's own consent prompt.  It takes no argument:
+   * the main process knows which remedy applies and how to build it, so the window can
+   * never ask for one that does not.  Answers with the same `{status, labels, settings}`
+   * payload, carrying the outcome in `status.fixResult`.
+   */
+  fix: () => ipcRenderer.invoke('fix'),
+  /**
    * Push channel: the main process sends the same `{status, labels}` payload the
    * invoke verbs return, whenever the status changes.
    */

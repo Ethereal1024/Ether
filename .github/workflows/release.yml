@@ -14,7 +14,7 @@
 #   win  : SmartScreen warns on the first run ("Windows protected your PC" ->
 #          More info -> Run anyway). The installer itself never elevates —
 #          nsisi.perMachine/allowElevation are pinned in electron-builder.yml and
-#          test/noadmin.test.ts fails if either line moves.
+#          test/escalation.test.ts fails if either line moves.
 #   linux: nothing to bypass; dpkg -i the deb or chmod +x the AppImage.
 #
 # Why three runners and not one: electron-builder cannot cross-build two of

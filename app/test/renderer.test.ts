@@ -87,7 +87,7 @@ interface Harness {
   /** Push a payload the way `api.onState` would. `labels`/`settings` stick until replaced. */
   push(status: Push, labels?: UiLabels, settings?: Push): void;
   settle(): Promise<void>;
-  calls: { start: number; stop: number; restartAdb: number; measure: number; setSetting: number };
+  calls: { start: number; stop: number; restartAdb: number; measure: number; setSetting: number; fix: number };
   /** The last `{key, value}` a switch sent to the main process. */
   lastSetting: { key?: string; value?: unknown };
   /** Let the gated `start`/`stop` promise resolve. */
@@ -108,7 +108,14 @@ interface Harness {
  * controller is still being built; `startFails` makes a verb throw, which has to reach
  * the sentence the user reads.
  */
-function harness(opts: { stateFails?: boolean; startFails?: boolean; setSettingFails?: boolean } = {}): Harness {
+function harness(opts: {
+  stateFails?: boolean;
+  startFails?: boolean;
+  setSettingFails?: boolean;
+  /** What the main process offers when the remedy button is pressed, and how it ends. */
+  fixKind?: string;
+  fixReason?: string;
+} = {}): Harness {
   const htmlIds = new Set([...htmlSrc.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string));
   const requested = new Set<string>();
   const els = new Map<string, FakeEl>();
@@ -188,7 +195,7 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean; setSettingF
     },
   };
 
-  const calls = { start: 0, stop: 0, restartAdb: 0, measure: 0, setSetting: 0 };
+  const calls = { start: 0, stop: 0, restartAdb: 0, measure: 0, setSetting: 0, fix: 0 };
   let release: () => void = () => undefined;
   const gate = () =>
     new Promise<void>((resolve) => {
@@ -223,6 +230,19 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean; setSettingF
       calls.measure += 1;
       return { ok: true, mbps: 103.1 };
     },
+    /** The remedy button: the main process decides which remedy applies, carries it out
+     * through the desktop's own consent prompt, and answers with the whole payload. */
+    fix: async () => {
+      calls.fix += 1;
+      await gate();
+      return {
+        status: st({
+          state: 'error',
+          fix: opts.fixKind,
+          fixResult: opts.fixReason ? { ok: opts.fixReason === 'done', reason: opts.fixReason } : undefined,
+        }),
+      };
+    },
     /** The main process answers a switch with the whole payload, so the window draws
      * what happened — here, what was asked for. */
     setSetting: async (o: { key?: string; value?: unknown }) => {
@@ -230,9 +250,16 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean; setSettingF
       lastSetting.key = o.key;
       lastSetting.value = o.value;
       if (opts.setSettingFails) throw new Error('the settings file is read-only');
-      const next: Push = { autoConnect: false, launchAtLogin: false, error: false, ...(lastSettings ?? {}) };
+      const next: Push = {
+        autoConnect: false,
+        launchAtLogin: false,
+        keepRunning: true,
+        error: false,
+        ...(lastSettings ?? {}),
+      };
       if (o.key === 'autoConnect') next.autoConnect = o.value === true;
       if (o.key === 'launchAtLogin') next.launchAtLogin = o.value === true;
+      if (o.key === 'keepRunning') next.keepRunning = o.value !== false;
       return { status: st(), settings: next };
     },
     onState: (cb: (payload: unknown) => void) => {
@@ -700,20 +727,22 @@ test('Related software is the one block that names another program, and only fro
   assert.match(h.el('v-adb').textContent, /\[conflict\]$/);
 });
 
-// ── the two settings ────────────────────────────────────────────────────────
+// ── the three switches ──────────────────────────────────────────────────────
 
 test('the startup switches draw the state the OS reports, and send every change back', async () => {
   const h = harness();
   await h.settle();
-  h.push(st(), labels, { autoConnect: true, launchAtLogin: false, error: false });
+  h.push(st(), labels, { autoConnect: true, launchAtLogin: false, keepRunning: true, error: false });
 
   assert.equal(h.el('h-startup').textContent, labels.startup);
   assert.equal(h.el('set-at-login-label').textContent, labels.launchAtLogin);
   assert.equal(h.el('set-auto-connect-label').textContent, labels.autoConnect);
-  // Two switches, two different kinds of truth: one is the OS's own login item, the
-  // other is the line we write ourselves. The payload says which is which.
+  assert.equal(h.el('set-keep-running-label').textContent, labels.keepRunning);
+  // Three switches, two different kinds of truth: one is the OS's own login item, the
+  // other two are lines we write ourselves. The payload says which is which.
   assert.equal(h.el('set-auto-connect').checked, true);
   assert.equal(h.el('set-at-login').checked, false);
+  assert.equal(h.el('set-keep-running').checked, true);
   assert.equal(h.el('startup-note').hidden, true);
 
   h.el('set-at-login').check(true);
@@ -729,18 +758,25 @@ test('the startup switches draw the state the OS reports, and send every change 
   assert.equal(h.calls.setSetting, 2);
   assert.deepEqual(h.lastSetting, { key: 'autoConnect', value: false });
   assert.equal(h.el('set-auto-connect').checked, false);
+
+  // The third one is what a close *means*: the window is the front door, not the app.
+  h.el('set-keep-running').check(false);
+  await h.settle();
+  assert.equal(h.calls.setSetting, 3);
+  assert.deepEqual(h.lastSetting, { key: 'keepRunning', value: false });
+  assert.equal(h.el('set-keep-running').checked, false);
 });
 
 test('a setting the OS will not take is one line where it was asked for', async () => {
   const h = harness();
   await h.settle();
-  h.push(st(), labels, { autoConnect: false, launchAtLogin: false, error: true });
+  h.push(st(), labels, { autoConnect: false, launchAtLogin: false, keepRunning: true, error: true });
   assert.equal(h.el('startup-note').hidden, false);
   assert.equal(h.el('startup-note').textContent, labels.startupError);
   // Not the sentence under the link: the link is fine, the switch is what failed.
   assert.equal(h.el('status-line').textContent, '');
 
-  h.push(st(), labels, { autoConnect: false, launchAtLogin: false, error: false });
+  h.push(st(), labels, { autoConnect: false, launchAtLogin: false, keepRunning: true, error: false });
   assert.equal(h.el('startup-note').hidden, true);
   assert.equal(h.el('startup-note').textContent, '');
 });
@@ -762,7 +798,96 @@ test('a payload with no settings draws the switches off rather than failing', as
   h.push(st(), labels); // an older payload: no `settings` field at all
   assert.equal(h.el('set-at-login').checked, false);
   assert.equal(h.el('set-auto-connect').checked, false);
+  // Keeping the link up is the one whose default is on: an unreadable settings file must
+  // not silently turn a running link into something a closed window drops.
+  assert.equal(h.el('set-keep-running').checked, true);
   assert.equal(h.el('startup-note').hidden, true);
+});
+
+// ── the remedy the app carries out itself ───────────────────────────────────
+
+test('the remedy button is drawn only when the main process offers one, and it is the one offered', async () => {
+  const h = harness();
+  await h.settle();
+  assert.equal(h.el('fix').hidden, true, 'a plain status has nothing to install');
+  assert.equal(h.el('fix-button').hidden, true);
+
+  // One well, three remedies: the button says what this press will actually do, and the
+  // window never picks the remedy itself.
+  for (const [kind, name] of [
+    ['grantDeviceAccess', 'fixGrantAccess'],
+    ['installTraySupport', 'fixInstallTray'],
+    ['installUsbDriver', 'fixInstallDriver'],
+  ] as const) {
+    h.push(st({ state: 'error', messageKey: 'noPermissions', message: t('noPermissions'), fix: kind }), labels);
+    assert.equal(h.el('fix').hidden, false, kind);
+    assert.equal(h.el('fix-button').hidden, false, kind);
+    assert.equal(h.el('fix-label').textContent, word(labels, name), kind);
+    assert.equal(h.el('fix-note').hidden, true, 'nothing has happened yet');
+  }
+
+  // Anything the window does not know is not a button: a payload from a newer main
+  // process must not turn into a press that does the wrong thing.
+  h.push(st({ fix: 'installSomethingElse' }), labels);
+  assert.equal(h.el('fix').hidden, true);
+  assert.equal(h.el('fix-button').hidden, true);
+});
+
+test('the press asks the main process, and the receipt is what the press ended in', async () => {
+  const h = harness({ fixKind: 'installTraySupport', fixReason: 'done' });
+  await h.settle();
+  h.push(st({ fix: 'installTraySupport' }), labels);
+  assert.equal(h.el('fix-label').textContent, labels.fixInstallTray);
+
+  h.el('fix-button').click();
+  assert.equal(h.calls.fix, 1);
+  h.release();
+  await h.settle();
+  assert.equal(h.el('fix-note').textContent, labels.fixDone);
+  assert.equal(h.el('fix-note').hidden, false);
+});
+
+test('a dismissal is an answer, not a failure to report', async () => {
+  for (const [reason, name] of [
+    ['done', 'fixDone'],
+    ['refused', 'fixRefused'],
+    ['failed', 'fixFailed'],
+    ['noBroker', 'fixNoBroker'],
+  ] as const) {
+    const h = harness({ fixKind: 'grantDeviceAccess', fixReason: reason });
+    await h.settle();
+    h.push(st({ fix: 'grantDeviceAccess' }), labels);
+    h.el('fix-button').click();
+    h.release();
+    await h.settle();
+    assert.equal(h.el('fix-note').textContent, word(labels, name), reason);
+    // The sentence under the link is the link's own; the remedy has its own line.
+    assert.equal(h.el('status-line').textContent, '');
+  }
+});
+
+test('the receipt outlives the remedy, and a desktop with no tray says why closing the window is safe', async () => {
+  const h = harness();
+  await h.settle();
+  // A receipt with no remedy left: the install worked, so there is nothing to offer —
+  // and the user still gets to read what the press did.
+  h.push(st({ state: 'up', fixResult: { ok: true, reason: 'done' } }), labels);
+  assert.equal(h.el('fix').hidden, false);
+  assert.equal(h.el('fix-button').hidden, true);
+  assert.equal(h.el('fix-note').textContent, labels.fixDone);
+
+  // Nothing to install and no tray: the well stands for the one line that explains the
+  // fallback, because "closing this minimises it" is the answer to a question the user
+  // is about to ask.
+  h.push(st({ state: 'up', tray: { ok: false, fixable: false } }), labels);
+  assert.equal(h.el('fix').hidden, false);
+  assert.equal(h.el('fix-button').hidden, true);
+  assert.equal(h.el('fix-note').textContent, labels.trayMissing);
+
+  // A tray that works, nothing to install, no receipt: the well is gone entirely.
+  h.push(st({ state: 'up', tray: { ok: true, fixable: false } }), labels);
+  assert.equal(h.el('fix').hidden, true);
+  assert.equal(h.el('fix-note').textContent, '');
 });
 
 // ── the files themselves ────────────────────────────────────────────────────
@@ -835,10 +960,12 @@ test('the window is one fixed size, and the renderer never touches it', () => {
 
 test('every channel the preload exposes is one the main process answers', () => {
   const exposed = [...preloadSrc.matchAll(/ipcRenderer\.invoke\('([^']+)'/g)].map((m) => m[1] as string);
-  assert.deepEqual(exposed, ['state', 'start', 'stop', 'restart-adb', 'measure', 'set-setting']);
+  assert.deepEqual(exposed, ['state', 'start', 'stop', 'restart-adb', 'measure', 'set-setting', 'fix']);
 
   const used = [...new Set([...rendererCode.matchAll(/api\.([A-Za-z]+)\(/g)].map((m) => m[1] as string))].sort();
-  assert.deepEqual(used, ['measure', 'onState', 'restartAdb', 'setSetting', 'start', 'state', 'stop']);
+  // `api.fix` is the whole remedy path: one verb, because the main process is the one
+  // that knows which remedy applies.
+  assert.deepEqual(used, ['fix', 'measure', 'onState', 'restartAdb', 'setSetting', 'start', 'state', 'stop']);
   // `onState` is the push subscription; the rest are the invoke channels above.
   const camel = (verb: string) => verb.replace(/-(\w)/g, (_, c: string) => c.toUpperCase());
   for (const verb of used.filter((v) => v !== 'onState')) {
@@ -851,7 +978,11 @@ test('the layout is the three bands: two sticky rails and one scroller', () => {
   assert.match(ruleIn(cssSrc, '.appbar'), /position: sticky/);
   assert.match(ruleIn(cssSrc, '.actionbar'), /position: sticky/);
   assert.match(ruleIn(cssSrc, '.actionbar'), /bottom: 0/);
-  for (const selector of ['.chip.ok', '.chip.warn', '.chip.bad', '.status.bad', '.leg.on .dot', '.stat.bad', '.copy.copied']) {
+  for (const selector of ['.chip.ok', '.chip.warn', '.chip.bad', '.status.bad', '.leg.on .dot', '.stat.bad', '.copy.copied', '.remedy']) {
     assert.ok(ruleIn(cssSrc, selector).length > 0);
   }
+  // The remedy well stacks its button and its one line, and `hidden` collapses the gap
+  // between them: `<p>` and `<button>` are `display:flex` children otherwise.
+  assert.match(ruleIn(cssSrc, '.remedy'), /flex-direction: column/);
+  assert.match(cssSrc, /\[hidden\]\s*\{\s*display: none/);
 });

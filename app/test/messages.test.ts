@@ -4,8 +4,8 @@
 // and the UI never invents prose.  Every message a user can see is one line, shaped
 // as an action ("check the cable", "allow USB debugging"), never as a tutorial.
 // What this file freezes is therefore not a translation pair but the *rules* those
-// sentences have to keep: no admin claim, no guessed hardware, no peer program's
-// name in the app's own voice.
+// sentences have to keep: no guessed hardware, no peer program's name in the app's own
+// voice — and no sentence that sends the user off to be the administrator themselves.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -44,10 +44,13 @@ test('every sentence is English: no Chinese survives in the app the user reads',
   }
 });
 
-test('no sentence ever says the app itself needs admin (§3.4 row 3, guard in noadmin.test.ts)', () => {
-  // The udev rule is the user's own one-time action in the OS; the app prints the
-  // commands and never runs them.  The sentence has to keep saying so.
-  assert.match(t('noPermissions'), /the app itself needs no admin/);
+test('no sentence sends the user off to be the administrator (guard in escalation.test.ts)', () => {
+  // The app may ask the OS for raised rights itself; what it must never do is *make the
+  // user* become root.  So the access sentence offers the in-app grant first, and keeps
+  // the paste-able command only as the fallback for a desktop that cannot prompt.
+  assert.match(t('noPermissions'), /grant it in the app/);
+  assert.match(t('noPermissions'), /run the command yourself/);
+  assert.equal(/\badmin(istrator)?\b/i.test(t('noPermissions')), false, 'the sentence is about the rule, not about rights');
   assert.equal(t('noPermissionsAfterRule').includes('sudo'), false, 'a rule already installed needs no command');
   for (const k of allKeys()) {
     // "the app itself needs no admin" is the point; "the app needs administrator

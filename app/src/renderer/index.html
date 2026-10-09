@@ -73,8 +73,9 @@
           </div>
         </section>
 
-        <!-- The Linux remedy: two commands the user pastes into a shell themselves
-             (the app never asks for root), with the block's own copy control. -->
+        <!-- The Linux remedy: two commands the user pastes into a shell themselves,
+             as the fallback for a machine that cannot raise an elevated prompt at
+             all, with the block's own copy control. -->
         <section id="udev" class="well" hidden>
           <pre id="udev-cmd" class="code"></pre>
           <button id="copy-udev" class="copy" type="button">
@@ -87,6 +88,23 @@
             </svg>
             <span id="copy-udev-label" class="sr-only"></span>
           </button>
+        </section>
+
+        <!-- The one remedy the app can carry out itself, on the desktops that will ask
+             the user for the rights it needs: the access rule for the device, the tray
+             support this session is missing, the USB driver on Windows.  One button,
+             named for what it installs, and one line for what happened — a dismissal is
+             an answer and says so.  It is on screen only while there is such a remedy,
+             which is why it never competes with the link's own sentence. -->
+        <section id="fix" class="well remedy" hidden>
+          <button id="fix-button" class="btn" type="button" hidden>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />
+              <path d="M9.5 12.5 11 14l3.5-3.5" />
+            </svg>
+            <span id="fix-label"></span>
+          </button>
+          <p id="fix-note" class="note"></p>
         </section>
 
         <!-- The other contextual remedy, drawn only in the one state that has it:
@@ -115,11 +133,11 @@
           </summary>
 
           <div class="sheet">
-            <!-- The two things this app may do before the user asks, each a native
+            <!-- The three things this app may do before the user asks, each a native
                  checkbox: the platform's own control, operable from the keyboard and
                  announced with its own state, with no script behind it. One is the
-                 desktop's startup entry, the other a line in `settings.json`; both are
-                 off until the user says otherwise. -->
+                 desktop's startup entry, one is a line in `settings.json`, and the third
+                 is the same file's answer to what closing the window means. -->
             <section class="block">
               <h2 id="h-startup" class="block-title"></h2>
               <label class="switch">
@@ -129,6 +147,10 @@
               <label class="switch">
                 <input id="set-auto-connect" type="checkbox" />
                 <span id="set-auto-connect-label"></span>
+              </label>
+              <label class="switch">
+                <input id="set-keep-running" type="checkbox" />
+                <span id="set-keep-running-label"></span>
               </label>
               <p id="startup-note" class="note" hidden></p>
             </section>

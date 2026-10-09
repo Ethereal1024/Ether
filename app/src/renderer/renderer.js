@@ -25,6 +25,10 @@ const el = {
   rtt: $('rtt'),
   udev: $('udev'),
   udevCmd: $('udev-cmd'),
+  fix: $('fix'),
+  fixButton: $('fix-button'),
+  fixLabel: $('fix-label'),
+  fixNote: $('fix-note'),
   restartAdb: $('restart-adb'),
   restartAdbLabel: $('restart-adb-label'),
   moreLabel: $('more-label'),
@@ -34,6 +38,8 @@ const el = {
   chkAtLoginLabel: $('set-at-login-label'),
   chkAutoConnect: $('set-auto-connect'),
   chkAutoConnectLabel: $('set-auto-connect-label'),
+  chkKeepRunning: $('set-keep-running'),
+  chkKeepRunningLabel: $('set-keep-running-label'),
   startupNote: $('startup-note'),
   hCounts: $('h-counts'),
   hRelated: $('h-related'),
@@ -81,9 +87,10 @@ const LINK_NODES = { usb: $('link-usb'), tcp: $('link-tcp') };
 // ── state ───────────────────────────────────────────────────────────────────
 
 let labels = {};
-/** What the main process says about the two switches in Details → Startup.  The default
- * is "nothing on", which is also what a payload that predates the settings carries. */
-let settings = { autoConnect: false, launchAtLogin: false, error: false };
+/** What the main process says about the three switches in Details → Startup.  The
+ * default is the app's own: nothing dials on launch, and the link is kept running —
+ * which is also what a payload that predates the settings carries. */
+let settings = { autoConnect: false, launchAtLogin: false, keepRunning: true, error: false };
 /** A setting change the main process itself refused (an IPC that rejected), until the
  * next payload replaces it.  The refusal is drawn where the switch is, not in the
  * sentence under the link. */
@@ -111,6 +118,17 @@ const CHIP = {
   error: { key: 'needsAttention', tone: 'bad' },
   idle: { key: 'off', tone: '' },
 };
+
+/** The remedy the main process offers, and what it is called. The window never decides
+ * which remedy applies — it is handed one name (`status.fix`) or none. */
+const FIX_LABELS = {
+  grantDeviceAccess: 'fixGrantAccess',
+  installTraySupport: 'fixInstallTray',
+  installUsbDriver: 'fixInstallDriver',
+};
+
+/** How the last press ended. A dismissal is an answer and is drawn as one. */
+const FIX_NOTES = { done: 'fixDone', refused: 'fixRefused', failed: 'fixFailed', noBroker: 'fixNoBroker' };
 
 // ── drawing helpers ─────────────────────────────────────────────────────────
 
@@ -174,15 +192,19 @@ function render() {
   text(el.kHost, labels.hostRole ?? 'Host');
   text(el.kAdb, 'adb');
 
-  // The two switches the user owns.  `launchAtLogin` is not ours to remember: the main
+  // The three switches the user owns.  `launchAtLogin` is not ours to remember: the main
   // process asks the OS, so the switch cannot go on claiming the app opens at login
-  // after the user removed the entry themselves.  A change the OS refused is one line
-  // under them, and the switch keeps showing what is actually true.
+  // after the user removed the entry themselves.  The other two are lines in the
+  // settings file, and the third of them is what a close *means* — the switch that
+  // decides whether this window is the app or only its front door.  A change the OS
+  // refused is one line under them, and the switch keeps showing what is actually true.
   text(el.hStartup, labels.startup ?? 'Startup');
   text(el.chkAtLoginLabel, labels.launchAtLogin ?? '');
   text(el.chkAutoConnectLabel, labels.autoConnect ?? '');
+  text(el.chkKeepRunningLabel, labels.keepRunning ?? '');
   el.chkAtLogin.checked = Boolean(settings.launchAtLogin);
   el.chkAutoConnect.checked = Boolean(settings.autoConnect);
+  el.chkKeepRunning.checked = settings.keepRunning !== false;
   const note = settingsNote || (settings.error ? (labels.startupError ?? '') : '');
   text(el.startupNote, note);
   el.startupNote.hidden = !note;
@@ -224,6 +246,27 @@ function render() {
   const udev = s.messageKey === 'noPermissions' && Boolean(s.hint);
   el.udev.hidden = !udev;
   if (udev) text(el.udevCmd, s.hint);
+
+  // The remedy the app can carry out itself — the access rule, the tray support, the
+  // USB driver — installed through the desktop's own consent prompt.  Which one it is
+  // comes from the main process (`fix`), never from this file: the window cannot offer
+  // a remedy that does not apply.  The well stands while there is a remedy, while there
+  // is a receipt for the last press, or on a desktop with no tray at all — where the one
+  // line that matters is why closing the window keeps the link up by minimising it.
+  const fixKind = s.fix && FIX_LABELS[s.fix] ? s.fix : undefined;
+  const trayMissing = s.tray?.ok === false;
+  el.fix.hidden = !fixKind && !s.fixResult && !trayMissing;
+  el.fixButton.hidden = !fixKind;
+  if (fixKind) text(el.fixLabel, labels[FIX_LABELS[fixKind]] ?? '');
+  // The newest news wins: what the press ended in, or — with nothing to report yet —
+  // the state the desktop is in.
+  const fixNote = s.fixResult
+    ? (labels[FIX_NOTES[s.fixResult.reason]] ?? '')
+    : trayMissing
+      ? (labels.trayMissing ?? '')
+      : '';
+  text(el.fixNote, fixNote);
+  el.fixNote.hidden = !fixNote;
 
   // Restarting adb drops every other debugging session on the machine, so the button
   // is on screen only in the one state that is about a conflicting adb server.
@@ -400,10 +443,15 @@ el.button.addEventListener('click', () => {
 
 el.restartAdb.addEventListener('click', () => void run(() => api.restartAdb()));
 
+// The remedy button asks the main process to do the privileged thing itself — the
+// window has no idea which one that is, and no argument to send.
+el.fixButton.addEventListener('click', () => void run(() => api.fix()));
+
 // The switches ask the main process on every change — never a local flip it might not
 // have honoured.  They are drawn again from the payload that comes back.
 el.chkAtLogin.addEventListener('change', () => void setSetting('launchAtLogin', el.chkAtLogin.checked));
 el.chkAutoConnect.addEventListener('change', () => void setSetting('autoConnect', el.chkAutoConnect.checked));
+el.chkKeepRunning.addEventListener('change', () => void setSetting('keepRunning', el.chkKeepRunning.checked));
 
 el.measure.addEventListener('click', () => {
   el.measure.disabled = true;

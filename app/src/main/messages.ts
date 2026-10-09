@@ -36,9 +36,11 @@ type Vars = Record<string, string | number>;
 const MESSAGES: Record<MsgKey, string> = {
   noDevice: 'No USB device: check the cable and enable USB debugging on the device',
   unauthorized: 'Allow USB debugging on the device',
-  // Admin appears only at this step, and only as the user's own one-time action in
-  // the OS: the app itself never elevates (see test/noadmin.test.ts).
-  noPermissions: 'A one-time udev rule is needed to let the device through (run it in the OS; the app itself needs no admin)',
+  // The app may raise the desktop's own consent prompt for this one (elevate.ts), and
+  // the two commands stay as the fallback for a machine where it cannot or the user
+  // says no.  What the sentence may never do is tell the user to go and run it by hand
+  // as the only way: see test/escalation.test.ts.
+  noPermissions: 'A one-time access rule is needed to let the device through: grant it in the app, or run the command yourself',
   noPermissionsAfterRule: 'The udev rule is in place but the device is still denied: unplug and replug the cable; if that does not help, log out and back in',
   offline: 'The device is not responding: unplug and replug the cable, then retry',
   // "Streaming client" is the role of the far end, not the name of a program: which
@@ -135,9 +137,27 @@ export interface UiLabels {
   launchAtLogin: string;
   autoConnect: string;
   startupError: string;
+  /** The third row of that block: closing the window must not drop the link. */
+  keepRunning: string;
   /** The comment the desktop's own startup-applications list shows — the one sentence
    * of ours that is read outside this window. */
   loginItemComment: string;
+  /** The remedy well: one button per elevated action the app can perform itself, and
+   * the one line it reports afterwards. */
+  fixGrantAccess: string;
+  fixInstallTray: string;
+  fixInstallDriver: string;
+  /** The outcomes.  A dismissal is an answer, not an error, and says so. */
+  fixDone: string;
+  fixRefused: string;
+  fixFailed: string;
+  fixNoBroker: string;
+  /** Shown when this desktop has no tray at all, so "close keeps the link" is not a
+   * promise the user has to discover the meaning of. */
+  trayMissing: string;
+  /** The tray menu, in the main process. */
+  showWindow: string;
+  quit: string;
 }
 
 export const UI: UiLabels = {
@@ -185,7 +205,18 @@ export const UI: UiLabels = {
   launchAtLogin: 'Open Ether when you sign in',
   autoConnect: 'Connect the wired link on launch',
   startupError: 'The startup setting could not be changed',
+  keepRunning: 'Keep the link running when the window is closed',
   loginItemComment: 'Wired (adb) channel for the streaming client on this PC',
+  fixGrantAccess: 'Grant device access',
+  fixInstallTray: 'Install tray support',
+  fixInstallDriver: 'Install USB driver',
+  fixDone: 'Done',
+  fixRefused: 'Dismissed: nothing was changed',
+  fixFailed: 'The change could not be made',
+  fixNoBroker: 'This desktop cannot ask for elevated rights: run the command below',
+  trayMissing: 'No tray icon on this desktop: closing the window minimises it instead, and the link stays up',
+  showWindow: 'Show Ether',
+  quit: 'Quit Ether',
 };
 
 export function uiLabels(): UiLabels {

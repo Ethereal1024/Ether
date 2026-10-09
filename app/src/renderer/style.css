@@ -478,6 +478,31 @@ body {
   display: block;
 }
 
+/* The remedy well: the one place an elevated action is offered.  A column, because the
+   outcome of a press belongs under the button that caused it, and a receipt with no
+   button still has to read as a sentence rather than as a gap where a control was.  The
+   padding is the well's own — a `.code` well gets its air from the block inside it, and
+   this one has none. */
+.remedy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-2);
+  padding: var(--s-3) 12px;
+}
+
+/* The button is the remedy's own size, not the full width of the well: it is one action
+   with one name, and a stretched plate would read as the window's main button. */
+.remedy .btn {
+  align-self: flex-start;
+}
+
+/* The one line is quieter than the button: what happened, or what this desktop is like,
+   never a second call to action. */
+.remedy .note {
+  margin: 0;
+}
+
 /* ── 6. Details: one native disclosure ──────────────────────────────────── */
 
 .more {
