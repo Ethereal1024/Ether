@@ -81,7 +81,10 @@ test('the C self-test still passes with its dynamic ports (§13.4 #5 prerequisit
   const r = spawnSync(cBin, ['--test'], { encoding: 'utf8', timeout: 60_000, maxBuffer: 8 << 20 });
   const out = r.stdout ?? '';
   const err = r.stderr ?? '';
-  assert.equal(r.status, 0, `C self-test exited ${r.status} (signal ${r.signal})\n${err}`);
+  // Both streams in the failure message: the phases (which one broke) are on
+  // stdout and the reasons are on stderr, so a platform-specific failure is
+  // undiagnosable from either one alone.
+  assert.equal(r.status, 0, `C self-test exited ${r.status} (signal ${r.signal})\n--- stdout ---\n${out}\n--- stderr ---\n${err}`);
   assert.match(out, /TEST PASS/);
   assert.match(err, /\[test\] ports host=\d+ device=\d+ echo=\d+/);
   const ports = (err.match(/\[test\] ports host=(\d+) device=(\d+) echo=(\d+)/) ?? []).slice(1).map(Number);

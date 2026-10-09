@@ -212,11 +212,25 @@ static void txq_enqueue(txq_t *q, const unsigned char *p, size_t n) {
   q->len += n;
 }
 
+/*
+ * "Not ready yet" is not a failure, and the spellings differ per platform: a
+ * socket whose non-blocking connect() has not completed answers EAGAIN on Linux
+ * but ENOTCONN on BSD/macOS (poll() reports it writable only once the connect
+ * has finished).  A relay that only retried on EAGAIN dropped the queue - and
+ * with it the peer - a few microseconds after creating it, which on macOS read
+ * as "the tunnel comes up and then nothing ever crosses it".
+ */
+static int not_ready_yet(int e) {
+  return e == EAGAIN || e == EWOULDBLOCK || e == EINTR || e == ENOTCONN || e == EINPROGRESS;
+}
+
 static void txq_flush(txq_t *q) {
   while (q->fd >= 0 && q->sent < q->len) {
     ssize_t w = write(q->fd, q->buf + q->sent, q->len - q->sent);
     if (w > 0) { q->sent += (size_t) w; continue; }
-    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+    if (w < 0 && not_ready_yet(errno)) return;      /* data stays queued */
+    fprintf(stderr, "[relay] tcp write failed: %s\n",
+            w < 0 ? strerror(errno) : "write returned 0");
     txq_close(q);
     return;
   }
@@ -285,7 +299,8 @@ static int peer_pump(peer_t *p, frame_cb cb, void *ctx) {
     ssize_t r = read(p->tcp_fd, p->rbuf + p->rlen, RBUF_SIZE - p->rlen);
     if (r > 0) { p->rlen += (size_t) r; continue; }
     if (r == 0) return 0;                           /* peer closed */
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 1;
+    if (not_ready_yet(errno)) return 1;             /* incl. connect in flight */
+    fprintf(stderr, "[relay] tcp read failed: %s\n", strerror(errno));
     return 0;
   }
 }
