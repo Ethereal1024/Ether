@@ -14,7 +14,7 @@
 // before a new one is built.
 
 import { existsSync } from 'node:fs';
-import { Adb, AdbError, type Device } from './adb.js';
+import { Adb, AdbError, type Device, type ReverseEntry } from './adb.js';
 import { t, type MsgKey, uiLabels } from './messages.js';
 import {
   BUSY_PORTS_TTL_MS,
@@ -136,6 +136,10 @@ export class Tunnel {
   private busy = false;
   /** Watchdog rounds; the tablet relay check runs on every TABLET_TICKS-th one. */
   private ticks = 0;
+  /** Bumped by every teardown: a round that was already in flight must not put a
+   * reverse back into a table `down()` has just cleared ("never leave anything
+   * behind" — reap.ts — is the one rule the whole house is built on). */
+  private epoch = 0;
   private sunshineBase = DEFAULT_BASE;
   /** Last tablet port sweep; see `deviceBusyPorts()`. */
   private tabletBusy: BusyPorts | null = null;
@@ -156,6 +160,7 @@ export class Tunnel {
     this.stopWatchdog();
     this.hostRelays.clear();
     this.deviceRelayPids = [];
+    this.epoch++;
     if (this.st.state !== 'up') this.st.state = 'idle';
     this.st.tcpMap = [];
     this.st.udpMap = [];
@@ -670,6 +675,7 @@ export class Tunnel {
   async down(o: { silent?: boolean } = {}): Promise<TunnelStatus> {
     this.stopWatchdog();
     this.forgetTabletPorts();
+    this.epoch++;
 
     // relays first: closing them frees the ports the reverses point at
     for (const [port, relay] of this.hostRelays) {
@@ -681,7 +687,7 @@ export class Tunnel {
       this.hostRelays.delete(port);
     }
 
-    const ports = [...this.st.tcpMap.map(([a]) => a), ...this.st.udpMap.map(([, b]) => b)];
+    const ports = this.reversePorts();
     const state = await readState(this.deps.dataDir);
     for (const p of [...(state?.tcpPorts ?? []), ...(state?.udpTunnels ?? []).map((u) => u.tunnel)]) {
       if (!ports.includes(p)) ports.push(p);
@@ -714,6 +720,74 @@ export class Tunnel {
 
   // -------------------------------------------------------------- watchdog
 
+  /** Every port `up()` handed to `adb reverse`: the TCP channels and one per UDP channel. */
+  private reversePorts(): number[] {
+    return [...new Set([...this.st.tcpMap.map(([a]) => a), ...this.st.udpMap.map(([, b]) => b)])];
+  }
+
+  /**
+   * The adb reverse table is the one leg of the bridge with no process behind it:
+   * `up()` adds each entry once, and the table itself lives inside the adb
+   * *server*.  An adb server restart — the very thing `Adb.conflict` warns about
+   * (§3.2) — a USB re-enumeration between two rounds, or an adbd hiccup empties
+   * it while `adb devices` goes on listing the device as `device`.  Every other
+   * check survives that untouched: the host relay keeps its listen socket, the
+   * tablet relay keeps running (its peer is freed, `udp2tcp.c`'s loop is not),
+   * and the three TCP channels never had a process at all.  The tunnel then says
+   * `up` over a bridge that cannot carry a packet, which is the 2026-10-10
+   * report: the stream dies, nothing is logged, and only a reconnect (which runs
+   * `up()` again) brings it back.
+   *
+   * One `adb reverse --list` per round: a call to the local server, not to the
+   * device, so unlike the tablet probe it may run every 2 s.  A port that is
+   * really gone is re-added (`adb reverse` rebinds it) and the round is then
+   * reported degraded — the table is whole again, but whatever the client had
+   * open through it died with the entries and only the client can open it again.
+   */
+  private async confirmReverses(): Promise<void> {
+    const wanted = this.reversePorts();
+    if (wanted.length === 0) return;
+    const epoch = this.epoch;
+
+    const missing = await this.missingReverses(wanted);
+    if (missing === undefined || missing.length === 0) return;
+
+    this.log(`[tunnel] adb reverse(s) gone: ${missing.join(',')}; re-adding`);
+    for (const p of missing) {
+      if (epoch !== this.epoch) return; // a teardown started while we were asking
+      try {
+        await this.deps.adb.reverseAdd(p);
+      } catch (e) {
+        this.log(`[tunnel] adb reverse tcp:${p} could not be re-added: ${(e as Error).message}`);
+      }
+    }
+
+    // Read the table once more before saying anything loud.  An entry that comes
+    // back is what proves it was really gone; a listing that cannot be read at
+    // all (a server mid-restart, an adb whose output this parser does not know)
+    // proves nothing, and must not downgrade a link that may well be fine — the
+    // re-add is a no-op in that case (adb rebinds), so the round is only a few
+    // milliseconds worse off.
+    const after = await this.missingReverses(wanted);
+    if (after === undefined || after.length > 0 || epoch !== this.epoch) return;
+
+    // The table is whole again, but whatever the client had open through those
+    // entries died with them, and only the client can open it again.
+    this.setState('degraded', 'udpFail');
+  }
+
+  /** The ports `adb reverse --list` does not show; `undefined` = it did not answer. */
+  private async missingReverses(wanted: number[]): Promise<number[] | undefined> {
+    let live: ReverseEntry[];
+    try {
+      live = await this.deps.adb.reverseList();
+    } catch {
+      return undefined; // no answer is not an answer: say nothing this round
+    }
+    const present = new Set(live.map((e) => Number(e.remote.replace(/^tcp:/, ''))));
+    return wanted.filter((p) => !present.has(p));
+  }
+
   private startWatchdog(): void {
     this.stopWatchdog();
     const timer = setInterval(() => {
@@ -734,7 +808,13 @@ export class Tunnel {
     if (this.st.state !== 'up' && this.st.state !== 'degraded') return;
     try {
       const list = await this.deps.adb.devices();
-      const dev = list[0];
+      // For the device this tunnel was built for, not whoever `adb devices`
+      // happens to list first: `resolveDevice()` picks by serial, and with a
+      // second device on the bus `list[0]` can be a machine this tunnel never
+      // touches — the watchdog would then watch the wrong one and call a dead
+      // link healthy.
+      const serial = this.st.device?.serial;
+      const dev = list.find((d) => d.serial === serial) ?? list[0];
       if (!dev || dev.state !== 'device') {
         this.log('[tunnel] device went away; dismantling');
         await this.down({ silent: true });
@@ -744,6 +824,10 @@ export class Tunnel {
         this.emit();
         return;
       }
+
+      // The reverses, before the two halves of the bridge: they are the leg a
+      // server restart takes away without touching anything else (see the method).
+      await this.confirmReverses();
 
       // A host relay that is no longer listening means the bridge is one-sided;
       // say so instead of showing a cheerful "up" with a dead channel.
