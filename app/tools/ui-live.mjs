@@ -3,9 +3,16 @@
 // checks the other half — that the payload the main process actually pushes draws
 // without a single page error and fills every node the markup promises.
 //
-// Usage: node tools/ui-live.mjs [port]   (the app must run with
-//        --remote-debugging-port=<port>; tools/ui-live.sh does that)
+// Usage: node tools/ui-live.mjs [port] [dataDir] [startupDir]   (the app must run with
+//        --remote-debugging-port=<port> and ETHER_DATA_DIR / ETHER_AUTOSTART_DIR set to
+//        the two directories; tools/ui-live.sh does that, so a click here can only ever
+//        write this run's own files.)
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+
 const port = Number(process.argv[2] ?? 9357);
+const dataDir = process.argv[3] ?? '';
+const atDir = process.argv[4] ?? '';
 const deadline = Date.now() + 20_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -78,6 +85,9 @@ const IDS = [
   'stat-peers-box', 'stat-peers', 'stat-peers-k', 'h-related', 'k-client', 'v-client', 'k-host', 'v-host',
   'k-adb', 'v-adb', 'h-ports', 'ports', 'ports-none', 'copy-ports', 'copy-ports-label', 'h-logs', 'logs',
   'copy', 'copy-label', 'measure', 'measure-label', 'main-button', 'copy-live',
+  // Details → Startup: the two switches the app may act on before the user asks.
+  'h-startup', 'set-at-login', 'set-at-login-label', 'set-auto-connect', 'set-auto-connect-label',
+  'startup-note',
 ];
 
 const snapshot = `(() => {
@@ -97,6 +107,16 @@ const snapshot = `(() => {
     status: txt('status-line'),
     more: txt('more-label'),
     countsHeading: txt('h-counts'),
+    startup: {
+      heading: txt('h-startup'),
+      atLoginLabel: txt('set-at-login-label'),
+      autoConnectLabel: txt('set-auto-connect-label'),
+      atLogin: g('set-at-login').checked,
+      autoConnect: g('set-auto-connect').checked,
+      note: txt('startup-note'),
+      noteHidden: g('startup-note').hidden,
+      box: box('#set-at-login'),
+    },
     logsFirst: (txt('logs') ?? '').split('\\n')[0],
     cardBox: box('.card'),
     fieldsBox: box('.fields'),
@@ -144,6 +164,70 @@ const still =
   Math.abs(opened.footerBox.top - live.footerBox.top) <= 0.5 &&
   Math.abs(opened.moreBox.top - live.moreBox.top) <= 0.5;
 
+// ── the two switches, through the real preload and the real main process ────
+//
+// Everything above only *reads* the window.  These four clicks are the only thing this
+// run ever changes, and both halves of that change are checked on disk: the settings
+// file the app owns, and the per-user startup entry — both inside the directories the
+// launcher pinned, so the run can write nothing of the developer's.  Each switch is
+// turned back off before the next one, leaving the app exactly as it was found.
+
+const click = async (id) => {
+  await send('Runtime.evaluate', { expression: `(document.getElementById(${JSON.stringify(id)}).click(), 'ok')`, returnByValue: true });
+  await sleep(500);
+};
+const read = async () =>
+  JSON.parse((await send('Runtime.evaluate', { expression: snapshot, returnByValue: true })).result.result.value);
+/** Poll, because the write is the app's, not ours: the file lands when it lands. */
+const settle = async (fn) => {
+  for (let i = 0; i < 20; i++) {
+    try {
+      if (fn()) return true;
+    } catch {
+      // not there yet, or mid-write
+    }
+    await sleep(250);
+  }
+  return false;
+};
+const settingsFile = () => {
+  try {
+    return JSON.parse(readFileSync(path.join(dataDir, 'settings.json'), 'utf8'));
+  } catch {
+    return {};
+  }
+};
+const entryFile = () => path.join(atDir, 'ether.desktop');
+
+const startupIdle = live.startup;
+await click('set-auto-connect');
+const autoOn = await read();
+const autoOnWritten = await settle(() => settingsFile().autoConnect === true);
+await click('set-auto-connect');
+const autoOff = await read();
+const autoOffWritten = await settle(() => settingsFile().autoConnect === false);
+
+await click('set-at-login');
+const loginOn = await read();
+const entryWritten = await settle(() => existsSync(entryFile()));
+const entryOnDisk = entryWritten ? readFileSync(entryFile(), 'utf8') : '';
+// The first argument of `Exec=`, unquoted: the program the session will start.
+const execProgram =
+  (entryOnDisk
+    .split('\n')
+    .find((l) => l.startsWith('Exec=')) ?? '')
+    .replace(/^Exec=/, '')
+    .match(/^"[^"]*"|\S+/)?.[0]
+    ?.replace(/^"|"$/g, '') ?? '';
+await click('set-at-login');
+const loginOff = await read();
+const entryRemoved = await settle(() => !existsSync(entryFile()));
+
+console.log('startup block  :', JSON.stringify(startupIdle));
+console.log('auto-connect   :', `click → ${autoOn.startup.autoConnect}, back → ${autoOff.startup.autoConnect}`);
+console.log('launch at login:', `click → ${loginOn.startup.atLogin}, back → ${loginOff.startup.atLogin}`);
+console.log('startup entry  :', entryOnDisk ? entryOnDisk.split('\n').filter(Boolean).join(' | ') : '(none)');
+
 console.log('readyState     :', live.readyState, '  lang:', live.lang);
 console.log('bridge keys    :', live.bridge.join(', '));
 console.log('viewport       :', `${live.viewport.w}×${live.viewport.h} CSS px`);
@@ -171,6 +255,47 @@ const checks = [
     `card ${live.cardBox.height}, window ${live.viewport.h} − chrome ${live.chrome}`,
   ],
   ['the page threw nothing', errors.length === 0, errors.join(' | ')],
+  [
+    'the two switches are drawn under their own heading, both off',
+    startupIdle.heading.length > 0 && startupIdle.atLogin === false && startupIdle.autoConnect === false && startupIdle.noteHidden === true,
+    JSON.stringify(startupIdle),
+  ],
+  [
+    'both switches are labelled in English, in the window’s own words',
+    startupIdle.atLoginLabel.length > 0 &&
+      startupIdle.autoConnectLabel.length > 0 &&
+      !/[\u3400-\u9fff]/.test(`${startupIdle.heading}${startupIdle.atLoginLabel}${startupIdle.autoConnectLabel}`),
+    JSON.stringify([startupIdle.heading, startupIdle.atLoginLabel, startupIdle.autoConnectLabel]),
+  ],
+  [
+    'a real click on the auto-connect switch turns it on, and the app writes it down',
+    autoOn.startup.autoConnect === true && autoOnWritten,
+    `drawn ${autoOn.startup.autoConnect}, settings.json ${JSON.stringify(settingsFile())}`,
+  ],
+  [
+    'and a second click turns it back off, in the window and on disk',
+    autoOff.startup.autoConnect === false && autoOffWritten,
+    `drawn ${autoOff.startup.autoConnect}, settings.json ${JSON.stringify(settingsFile())}`,
+  ],
+  [
+    'a real click on the launch switch installs the per-user startup entry',
+    loginOn.startup.atLogin === true &&
+      entryWritten &&
+      /^Type=Application$/m.test(entryOnDisk) &&
+      /^Terminal=false$/m.test(entryOnDisk) &&
+      /^X-GNOME-Autostart-enabled=true$/m.test(entryOnDisk),
+    entryOnDisk ? entryOnDisk.split('\n').filter(Boolean).join(' | ') : '(no entry)',
+  ],
+  [
+    'the entry points at a program that is really there',
+    entryWritten && execProgram.startsWith('/') && existsSync(execProgram),
+    execProgram || '(no Exec)',
+  ],
+  [
+    'and a second click removes it again',
+    loginOff.startup.atLogin === false && entryRemoved,
+    `drawn ${loginOff.startup.atLogin}, entry exists ${existsSync(entryFile())}`,
+  ],
 ];
 let bad = 0;
 for (const [what, ok, detail] of checks) {

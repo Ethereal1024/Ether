@@ -22,10 +22,14 @@ PROBE_DIR=/tmp/ether-ui.$$
 # dir that is the developer's own `npm run dev` window.  An empty data dir records
 # nothing, so this run can only ever reap itself (platform.ts honours the override).
 DATA_DIR=/tmp/ether-ui-data.$$
+# The same reasoning for the startup entry: this probe only draws the switches, but the
+# window it draws them in is a real app whose launch-at-login truth is read from the OS —
+# pinned here so a stray click can never touch the developer's own session.
+AT_DIR=/tmp/ether-ui-autostart.$$
 LOG=tools/_ui_app.log
 : > "$LOG"
-rm -rf "$PROBE_DIR" "$DATA_DIR" "$SHOT_DIR"
-mkdir -p "$SHOT_DIR" "$DATA_DIR"
+rm -rf "$PROBE_DIR" "$DATA_DIR" "$AT_DIR" "$SHOT_DIR"
+mkdir -p "$SHOT_DIR" "$DATA_DIR" "$AT_DIR"
 
 if ! npm run build > tools/_ui_build.log 2>&1; then
   echo "FAIL: build"; tail -5 tools/_ui_build.log; exit 1
@@ -34,7 +38,7 @@ fi
 # --disable-gpu is for this host only: its GPU process cannot start (error_code=1002)
 # and newer Chromium escalates that to "GPU process isn't usable. Goodbye."; the layout
 # and the computed styles do not care how the pixels are produced.
-setsid nohup env ETHER_DATA_DIR="$DATA_DIR" ./node_modules/.bin/electron --user-data-dir="$PROBE_DIR" --remote-debugging-port="$PORT" --disable-gpu . > "$LOG" 2>&1 &
+setsid nohup env ETHER_DATA_DIR="$DATA_DIR" ETHER_AUTOSTART_DIR="$AT_DIR" ./node_modules/.bin/electron --user-data-dir="$PROBE_DIR" --remote-debugging-port="$PORT" --disable-gpu . > "$LOG" 2>&1 &
 
 i=0; wid=""; pid=""
 while [ "$i" -lt 40 ]; do
@@ -50,7 +54,7 @@ done
 if [ -z "$wid" ]; then
   echo "FAIL: no Ether window after ${i}s"
   tail -8 "$LOG"
-  rm -rf "$PROBE_DIR" "$DATA_DIR"
+  rm -rf "$PROBE_DIR" "$DATA_DIR" "$AT_DIR"
   exit 1
 fi
 echo "window $wid (pid $pid) appeared after ${i}s"
@@ -69,7 +73,7 @@ kill -TERM "$pid" 2>/dev/null && echo "kill -TERM $pid (window)"
 sleep 3
 [ -n "$launcher" ] && kill -TERM "$launcher" 2>/dev/null && echo "kill -TERM $launcher (launcher)"
 sleep 1
-rm -rf "$PROBE_DIR" "$DATA_DIR"
+rm -rf "$PROBE_DIR" "$DATA_DIR" "$AT_DIR"
 echo "Ether windows left: $(xwininfo -root -tree 2>/dev/null | grep -c '"Ether"')"
 echo "shots: $(ls "$SHOT_DIR" 2>/dev/null | tr '\n' ' ')"
 echo "ui probe rc=$rc"
