@@ -6,9 +6,9 @@
 # tools/ui-probe.sh: this is a second instance, and `reap.ts` kills whatever pid the real
 # data dir records — with the real dir that is the developer's own window.  An empty data
 # dir records nothing, so this run can only ever reap itself.  ETHER_AUTOSTART_DIR matters
-# for the same reason: the last thing this run does is click the launch-at-login switch,
-# and with the real value that entry would land in the developer's own session.  The only
-# thing clicked is that pair of switches, and each is clicked back off.
+# for the same reason: one of the things this run does is click the launch-at-login
+# switch, and with the real value that entry would land in the developer's own session.  The only
+# thing clicked is that row of switches, and each is clicked back to where it was found.
 set -u
 cd "$(dirname "$0")/.." || exit 1   # app/
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # tools/ui-probe.sh — launch the window and check the layout in the real engine
-# (tools/ui-probe.mjs), then capture the eight states.
+# (tools/ui-probe.mjs), then capture the twelve states.
 #
 # The fake-bridge probe answers layout questions only ("is anything outside the 560px
 # column", "do the rails stay put", "is the button on the bottom edge") — nothing that

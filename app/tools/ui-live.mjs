@@ -85,9 +85,11 @@ const IDS = [
   'stat-peers-box', 'stat-peers', 'stat-peers-k', 'h-related', 'k-client', 'v-client', 'k-host', 'v-host',
   'k-adb', 'v-adb', 'h-ports', 'ports', 'ports-none', 'copy-ports', 'copy-ports-label', 'h-logs', 'logs',
   'copy', 'copy-label', 'measure', 'measure-label', 'main-button', 'copy-live',
-  // Details → Startup: the two switches the app may act on before the user asks.
+  // Details → Startup: the three switches the app may act on before the user asks.
   'h-startup', 'set-at-login', 'set-at-login-label', 'set-auto-connect', 'set-auto-connect-label',
-  'startup-note',
+  'set-keep-running', 'set-keep-running-label', 'startup-note',
+  // The remedy the app installs itself, through the desktop's own consent prompt.
+  'fix', 'fix-button', 'fix-label', 'fix-note',
 ];
 
 const snapshot = `(() => {
@@ -111,11 +113,22 @@ const snapshot = `(() => {
       heading: txt('h-startup'),
       atLoginLabel: txt('set-at-login-label'),
       autoConnectLabel: txt('set-auto-connect-label'),
+      keepRunningLabel: txt('set-keep-running-label'),
       atLogin: g('set-at-login').checked,
       autoConnect: g('set-auto-connect').checked,
+      keepRunning: g('set-keep-running').checked,
       note: txt('startup-note'),
       noteHidden: g('startup-note').hidden,
       box: box('#set-at-login'),
+      next: box('#set-auto-connect'),
+      last: box('#set-keep-running'),
+    },
+    remedy: {
+      hidden: g('fix').hidden,
+      buttonHidden: g('fix-button').hidden,
+      label: txt('fix-label'),
+      note: txt('fix-note'),
+      noteHidden: g('fix-note').hidden,
     },
     logsFirst: (txt('logs') ?? '').split('\\n')[0],
     cardBox: box('.card'),
@@ -164,13 +177,13 @@ const still =
   Math.abs(opened.footerBox.top - live.footerBox.top) <= 0.5 &&
   Math.abs(opened.moreBox.top - live.moreBox.top) <= 0.5;
 
-// ── the two switches, through the real preload and the real main process ────
+// ── the switches, through the real preload and the real main process ───────
 //
-// Everything above only *reads* the window.  These four clicks are the only thing this
+// Everything above only *reads* the window.  These six clicks are the only thing this
 // run ever changes, and both halves of that change are checked on disk: the settings
 // file the app owns, and the per-user startup entry — both inside the directories the
 // launcher pinned, so the run can write nothing of the developer's.  Each switch is
-// turned back off before the next one, leaving the app exactly as it was found.
+// turned back to where it was found before the next one, the keep-alive one included.
 
 const click = async (id) => {
   await send('Runtime.evaluate', { expression: `(document.getElementById(${JSON.stringify(id)}).click(), 'ok')`, returnByValue: true });
@@ -223,10 +236,21 @@ await click('set-at-login');
 const loginOff = await read();
 const entryRemoved = await settle(() => !existsSync(entryFile()));
 
+// The third switch is the one that decides what closing the window means.  It is turned
+// off and back on so the file is left exactly as it was found.
+await click('set-keep-running');
+const keepOff = await read();
+const keepOffWritten = await settle(() => settingsFile().keepRunning === false);
+await click('set-keep-running');
+const keepOn = await read();
+const keepOnWritten = await settle(() => settingsFile().keepRunning === true);
+
 console.log('startup block  :', JSON.stringify(startupIdle));
 console.log('auto-connect   :', `click → ${autoOn.startup.autoConnect}, back → ${autoOff.startup.autoConnect}`);
 console.log('launch at login:', `click → ${loginOn.startup.atLogin}, back → ${loginOff.startup.atLogin}`);
+console.log('keep running   :', `click → ${keepOff.startup.keepRunning}, back → ${keepOn.startup.keepRunning}`);
 console.log('startup entry  :', entryOnDisk ? entryOnDisk.split('\n').filter(Boolean).join(' | ') : '(none)');
+console.log('remedy well    :', JSON.stringify(live.remedy));
 
 console.log('readyState     :', live.readyState, '  lang:', live.lang);
 console.log('bridge keys    :', live.bridge.join(', '));
@@ -256,16 +280,26 @@ const checks = [
   ],
   ['the page threw nothing', errors.length === 0, errors.join(' | ')],
   [
-    'the two switches are drawn under their own heading, both off',
-    startupIdle.heading.length > 0 && startupIdle.atLogin === false && startupIdle.autoConnect === false && startupIdle.noteHidden === true,
+    'the three switches are drawn under their own heading: nothing at login, no auto connect, keep-alive on',
+    startupIdle.heading.length > 0 &&
+      startupIdle.atLogin === false &&
+      startupIdle.autoConnect === false &&
+      startupIdle.keepRunning === true &&
+      startupIdle.noteHidden === true,
     JSON.stringify(startupIdle),
   ],
   [
-    'both switches are labelled in English, in the window’s own words',
+    'the switches are one column of rows, not a sideways row',
+    startupIdle.next && startupIdle.last && startupIdle.next.top >= startupIdle.box.bottom - 0.5 && startupIdle.last.top >= startupIdle.next.bottom - 0.5,
+    JSON.stringify([startupIdle.box, startupIdle.next, startupIdle.last]),
+  ],
+  [
+    'every switch is labelled in English, in the window’s own words',
     startupIdle.atLoginLabel.length > 0 &&
       startupIdle.autoConnectLabel.length > 0 &&
-      !/[\u3400-\u9fff]/.test(`${startupIdle.heading}${startupIdle.atLoginLabel}${startupIdle.autoConnectLabel}`),
-    JSON.stringify([startupIdle.heading, startupIdle.atLoginLabel, startupIdle.autoConnectLabel]),
+      startupIdle.keepRunningLabel.length > 0 &&
+      !/[\u3400-\u9fff]/.test(`${startupIdle.heading}${startupIdle.atLoginLabel}${startupIdle.autoConnectLabel}${startupIdle.keepRunningLabel}`),
+    JSON.stringify([startupIdle.heading, startupIdle.atLoginLabel, startupIdle.autoConnectLabel, startupIdle.keepRunningLabel]),
   ],
   [
     'a real click on the auto-connect switch turns it on, and the app writes it down',
@@ -295,6 +329,30 @@ const checks = [
     'and a second click removes it again',
     loginOff.startup.atLogin === false && entryRemoved,
     `drawn ${loginOff.startup.atLogin}, entry exists ${existsSync(entryFile())}`,
+  ],
+  [
+    'a real click on the keep-alive switch turns it off, and the app writes that down',
+    keepOff.startup.keepRunning === false && keepOffWritten,
+    `drawn ${keepOff.startup.keepRunning}, settings.json ${JSON.stringify(settingsFile())}`,
+  ],
+  [
+    'and a second click turns it back on, in the window and on disk',
+    keepOn.startup.keepRunning === true && keepOnWritten,
+    `drawn ${keepOn.startup.keepRunning}, settings.json ${JSON.stringify(settingsFile())}`,
+  ],
+  [
+    'the preload offers the one verb that can install the missing piece',
+    live.bridge.includes('fix'),
+    live.bridge.join(', '),
+  ],
+  [
+    'the remedy well tells one of three truths: offered, reported, or nothing at all',
+    // A button on screen carries the app's own name for the change; a well with no
+    // button carries a line to read; and a hidden well carries nothing.
+    (!live.remedy.hidden && !live.remedy.buttonHidden && live.remedy.label.length > 0) ||
+      live.remedy.hidden ||
+      (!live.remedy.hidden && live.remedy.buttonHidden && !live.remedy.noteHidden && live.remedy.note.length > 0),
+    JSON.stringify(live.remedy),
   ],
 ];
 let bad = 0;

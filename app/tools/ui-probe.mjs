@@ -108,6 +108,11 @@ const degraded = {
 // drawn with a leg carrying and legs that are not — the reason it is drawn at all.
 const plugged = { ...base, device };
 
+// The state where the app can install the missing access rule itself, through the
+// desktop's own consent prompt: the remedy is offered from the first screen, which is
+// exactly where a user who just read "no permissions" is looking.
+const fixState = { ...up, fix: 'grantDeviceAccess' };
+
 const STATES = [
   ['01-idle.png', base, false, null],
   ['02-up.png', up, false, null],
@@ -119,9 +124,12 @@ const STATES = [
   ['08-details-logs.png', { ...up, logs: logs.map((l) => `2024-05-05T10:00:00Z ${l}`) }, true, '#logs'],
   ['09-degraded.png', degraded, false, null],
   ['10-plugged.png', plugged, false, null],
-  // The two switches have their own shot: they are the first block of the sheet, so at
+  // The switches have their own shot: they are the first block of the sheet, so at
   // scroll 0 they sit under the action rail and no other shot shows them at all.
   ['11-details-startup.png', up, true, '#h-startup'],
+  // The remedy the app carries out itself, drawn where it belongs: above the
+  // disclosure, on the screen the user is already on.
+  ['12-fix.png', fixState, false, null],
 ];
 
 // ── the probe page: the shipping markup, a stand-in bridge ─────────────────
@@ -152,9 +160,12 @@ window.__probe = { labels: ${JSON.stringify(labels)}, fake: null };
 // The switches' own half of the payload, and what a verb answered: the stand-in keeps
 // them in one object the way the main process does, so a switch drawn from the answer is
 // the same thing as a switch drawn from the payload.
-window.__probe.settings = { autoConnect: false, launchAtLogin: false, error: false };
+window.__probe.settings = { autoConnect: false, launchAtLogin: false, keepRunning: true, error: false };
 window.__probe.calls = [];
 window.__probe.refuse = false;
+// What a privileged run answered. One receipt, handed back the way a pushed status is,
+// so the line under the button is the app's own sentence for the outcome.
+window.__probe.receipt = { ok: true, reason: 'done' };
 window.__probe.payload = { status: ${JSON.stringify(base)}, labels: window.__probe.labels, settings: window.__probe.settings, lang: 'en' };
 window.__probe.verbs = {
   up: { status: ${JSON.stringify({ ...up, mbps: 0 })}, labels: window.__probe.labels, settings: window.__probe.settings, lang: 'en' },
@@ -166,11 +177,21 @@ window.__probe.fake = {
   stop: () => Promise.resolve(window.__probe.verbs.idle),
   restartAdb: () => Promise.resolve(window.__probe.verbs.idle),
   measure: () => Promise.resolve({ ok: true, mbps: 103.1 }),
+  fix: () => {
+    window.__probe.calls.push({ key: 'fix', value: true });
+    // The remedy is behind the prompt and never in the answer: what comes back is the
+    // receipt, exactly as the main process sends it.
+    return Promise.resolve({
+      status: Object.assign({}, window.__probe.payload.status, { fix: undefined, fixResult: window.__probe.receipt }),
+      labels: window.__probe.labels,
+      settings: window.__probe.settings,
+    });
+  },
   setSetting: (o) => {
     const key = String((o || {}).key || '');
     const value = (o || {}).value === true;
     window.__probe.calls.push({ key, value });
-    if (key === 'autoConnect' || key === 'launchAtLogin') {
+    if (key === 'autoConnect' || key === 'launchAtLogin' || key === 'keepRunning') {
       // The answer, not the request: an OS that will not take the change comes back with
       // the setting where it was and \`error\` set, which is what the note under the
       // switches is drawn from.
@@ -290,7 +311,7 @@ if (!painted) {
 
 await evaluate(`
 window.__ui = {
-  emit(status, settings) { window.__probe.emit({ labels: window.__probe.labels, status, lang: 'en', settings: settings || window.__probe.settings }); },
+  emit(status, settings) { window.__probe.payload.status = status; window.__probe.emit({ labels: window.__probe.labels, status, lang: 'en', settings: settings || window.__probe.settings }); },
   scrollTo(top) { document.getElementById('app').scrollTop = top; },
   open(on) { document.getElementById('more').open = on; },
   /** Every element whose box leaves the column sideways, worst first. */
@@ -636,66 +657,92 @@ for (const h of [185, 232, 320, 461]) {
 check('the card fills the band at every zoom', zoomOffenders.length === 0, zoomOffenders.join(' | '));
 await setViewport(HEIGHT);
 
-// ── the two switches in Details → Startup ──────────────────────────────────
+// ── the switches in Details → Startup ──────────────────────────────────────
 
 // The switches are drawn from the payload like every other node, and a click is an ask:
 // the box is drawn again from what came back, never flipped locally.  The stand-in
-// answers the way the main process does, including the refusal.
+// answers the way the main process does, including the refusal.  The third switch is the
+// one about the window itself: with it on, closing the window is not the end of the link.
+
+const SWITCHES = [
+  ['set-at-login', 'launchAtLogin'],
+  ['set-auto-connect', 'autoConnect'],
+  ['set-keep-running', 'keepRunning'],
+];
 
 await draw(up, true, 0);
 const switches = await json(`({
   heading: document.getElementById('h-startup').textContent.trim(),
-  atLoginLabel: document.getElementById('set-at-login-label').textContent.trim(),
-  autoConnectLabel: document.getElementById('set-auto-connect-label').textContent.trim(),
-  atLogin: document.getElementById('set-at-login').checked,
-  autoConnect: document.getElementById('set-auto-connect').checked,
+  labels: ${JSON.stringify(SWITCHES.map(([id]) => id + '-label'))}.map((id) => document.getElementById(id).textContent.trim()),
+  checked: ${JSON.stringify(SWITCHES.map(([id]) => id))}.map((id) => document.getElementById(id).checked),
   note: document.getElementById('startup-note').hidden,
-  box: window.__ui.box('#set-at-login'),
-  next: window.__ui.box('#set-auto-connect'),
+  boxes: ${JSON.stringify(SWITCHES.map(([id]) => '#' + id))}.map((sel) => window.__ui.box(sel)),
 })`);
 check(
-  'the two switches start off, under their own heading, with nothing to say',
-  switches.heading.length > 0 && switches.atLogin === false && switches.autoConnect === false && switches.note === true,
+  'the switches start in the state the file holds: nothing at login, no auto connect, and a window that keeps the link up',
+  switches.heading.length > 0 &&
+    switches.checked[0] === false &&
+    switches.checked[1] === false &&
+    switches.checked[2] === true &&
+    switches.note === true,
   JSON.stringify(switches),
 );
 check(
   'each switch is labelled in the window’s own words',
-  switches.atLoginLabel.length > 0 && switches.autoConnectLabel.length > 0 && !/[\u3400-\u9fff]/.test(`${switches.heading}${switches.atLoginLabel}${switches.autoConnectLabel}`),
-  JSON.stringify([switches.heading, switches.atLoginLabel, switches.autoConnectLabel]),
+  switches.labels.every((l) => l.length > 0) && !/[\u3400-\u9fff]/.test(`${switches.heading}${switches.labels.join('')}`),
+  JSON.stringify([switches.heading, ...switches.labels]),
 );
 check(
-  'the two switches are one column of two rows, not a sideways row',
-  switches.box && switches.next && switches.next.top >= switches.box.bottom - 0.5 && switches.next.left === switches.box.left,
-  JSON.stringify([switches.box, switches.next]),
+  'the switches are one column of equal rows, not a sideways row',
+  switches.boxes.every((b, i) => b && (i === 0 || (b.top >= switches.boxes[i - 1].bottom - 0.5 && b.left === switches.boxes[0].left))),
+  JSON.stringify(switches.boxes),
 );
 
 await evaluate(`(document.getElementById('set-at-login').click(), 'ok')`);
+await wait(250); // the answer is a promise: the box is drawn when it lands
+await evaluate(`(document.getElementById('set-auto-connect').click(), 'ok')`);
 await wait(250);
 const clicked = await json(`({
-  call: window.__probe.calls[window.__probe.calls.length - 1],
+  calls: window.__probe.calls.slice(-2),
   atLogin: document.getElementById('set-at-login').checked,
   autoConnect: document.getElementById('set-auto-connect').checked,
+  keepRunning: document.getElementById('set-keep-running').checked,
   note: document.getElementById('startup-note').hidden,
 })`);
 check(
-  'a switch asks the bridge, and is drawn from the answer it gets back',
-  clicked.call && clicked.call.key === 'launchAtLogin' && clicked.call.value === true && clicked.atLogin === true && clicked.autoConnect === false && clicked.note === true,
+  'each switch asks the bridge by its own name, and is drawn from the answer it gets back',
+  clicked.calls[0]?.key === 'launchAtLogin' &&
+    clicked.calls[0].value === true &&
+    clicked.calls[1]?.key === 'autoConnect' &&
+    clicked.calls[1].value === true &&
+    clicked.atLogin === true &&
+    clicked.autoConnect === true &&
+    clicked.keepRunning === true &&
+    clicked.note === true,
   JSON.stringify(clicked),
 );
 
-await evaluate(`(window.__probe.refuse = true, document.getElementById('set-auto-connect').click(), 'ok')`);
+// The one the OS can refuse: turning the keep-alive switch off from the answer alone is
+// how the window would lie about a file it never wrote, so a refusal has to leave the
+// box where the payload put it.
+await evaluate(`(window.__probe.refuse = true, document.getElementById('set-keep-running').click(), 'ok')`);
 await wait(250);
 const refused = await json(`({
+  call: window.__probe.calls[window.__probe.calls.length - 1],
   note: document.getElementById('startup-note').textContent.trim(),
   hidden: document.getElementById('startup-note').hidden,
   status: document.getElementById('status-line').textContent.trim(),
-  autoConnect: document.getElementById('set-auto-connect').checked,
+  keepRunning: document.getElementById('set-keep-running').checked,
   contrast: window.__ui.contrast('#startup-note'),
   over: window.__ui.overflow(),
 })`);
 check(
   'a change the app could not make says so under the switches, and leaves them where they were',
-  refused.note === labels.startupError && refused.hidden === false && refused.autoConnect === false,
+  refused.call?.key === 'keepRunning' &&
+    refused.call.value === false &&
+    refused.note === labels.startupError &&
+    refused.hidden === false &&
+    refused.keepRunning === true,
   JSON.stringify(refused),
 );
 check(
@@ -706,9 +753,112 @@ check(
 check('the refusal clears 4.5:1 on the sheet', refused.contrast !== null && refused.contrast >= 4.5, `${refused.contrast}:1`);
 check('the refusal is drawn inside the column', refused.over.length === 0, JSON.stringify(refused.over));
 
-// Back to the state the shots are taken in: two switches, off, with nothing to say.
-await evaluate(`(window.__probe.refuse = false, window.__probe.settings = { autoConnect: false, launchAtLogin: false, error: false }, 'ok')`);
+// Back to the state the shots are taken in: three switches, the file's own values, and
+// nothing to say.
+await evaluate(
+  `(window.__probe.refuse = false, window.__probe.settings = { autoConnect: false, launchAtLogin: false, keepRunning: true, error: false }, 'ok')`,
+);
 await draw(up, true, 0);
+
+// ── the remedy well ────────────────────────────────────────────────────────
+
+// The one well whose action the app performs itself, through the desktop's own consent
+// prompt.  Whether there is a remedy at all is the main process's word (`status.fix`),
+// never the window's guess, so what has to hold is: nothing offered → nothing on screen;
+// offered → one button named for what it installs; pressed → the receipt the answer
+// carried, and no button to press twice; a desktop with no tray at all → the note that
+// says why closing the window only minimises it.
+
+await draw(up, false, 0);
+check(
+  'with nothing to fix, the remedy well is not on screen at all',
+  (await json(`document.getElementById('fix').hidden`)) === true,
+  'fix well',
+);
+
+await draw(fixState, false, 0);
+const offered = await json(`({
+  hidden: document.getElementById('fix').hidden,
+  button: document.getElementById('fix-button').hidden,
+  label: document.getElementById('fix-label').textContent.trim(),
+  note: document.getElementById('fix-note').hidden,
+  contrast: window.__ui.contrast('#fix-label'),
+  over: window.__ui.overflow(),
+  box: window.__ui.box('#fix'),
+})`);
+check(
+  'a remedy the app can carry out is offered as one button named for the change',
+  offered.hidden === false && offered.button === false && offered.label === labels.fixGrantAccess && offered.note === true,
+  JSON.stringify(offered),
+);
+check('the offer clears 4.5:1 on the well', offered.contrast !== null && offered.contrast >= 4.5, `${offered.contrast}:1`);
+check('the offer is drawn inside the column', offered.over.length === 0, JSON.stringify(offered.over));
+
+await evaluate(`(document.getElementById('fix-button').click(), 'ok')`);
+await wait(300);
+const receipt = await json(`({
+  pressed: window.__probe.calls.filter((c) => c.key === 'fix').length,
+  hidden: document.getElementById('fix').hidden,
+  button: document.getElementById('fix-button').hidden,
+  note: document.getElementById('fix-note').textContent.trim(),
+  noteHidden: document.getElementById('fix-note').hidden,
+  over: window.__ui.overflow(),
+})`);
+check(
+  'pressing the offer asks the bridge once, and what comes back is the receipt',
+  receipt.pressed === 1 && receipt.hidden === false && receipt.button === true && receipt.note === labels.fixDone && receipt.noteHidden === false,
+  JSON.stringify(receipt),
+);
+check('the receipt is drawn inside the column', receipt.over.length === 0, JSON.stringify(receipt.over));
+
+// Every outcome a press can have, drawn on its own: a dismissal is an answer, and none
+// of them may put the button back.
+const reasons = { done: labels.fixDone, refused: labels.fixRefused, failed: labels.fixFailed, noBroker: labels.fixNoBroker };
+const wrongReceipts = [];
+for (const [reason, sentence] of Object.entries(reasons)) {
+  await draw({ ...base, fixResult: { ok: reason === 'done', reason } }, false, 0);
+  const got = await json(`({
+    hidden: document.getElementById('fix').hidden,
+    button: document.getElementById('fix-button').hidden,
+    note: document.getElementById('fix-note').textContent.trim(),
+  })`);
+  if (got.hidden !== false || got.button !== true || got.note !== sentence) wrongReceipts.push(`${reason}: ${JSON.stringify(got)}`);
+}
+check('each outcome of a press is one of the app’s own sentences, with nothing left to press', wrongReceipts.length === 0, wrongReceipts.join(' | '));
+
+await draw({ ...base, tray: { ok: false, fixable: false } }, false, 0);
+const noTray = await json(`({
+  hidden: document.getElementById('fix').hidden,
+  button: document.getElementById('fix-button').hidden,
+  note: document.getElementById('fix-note').textContent.trim(),
+})`);
+check(
+  'a desktop with no tray says why closing the window only minimises it, and offers nothing to press',
+  noTray.hidden === false && noTray.button === true && noTray.note === labels.trayMissing,
+  JSON.stringify(noTray),
+);
+
+await draw({ ...base, tray: { ok: true, fixable: false } }, false, 0);
+check(
+  'a desktop whose tray works keeps the well off screen',
+  (await json(`document.getElementById('fix').hidden`)) === true,
+  'fix well',
+);
+
+// Both lines at once — the offer and the last receipt — have to stack in the well's own
+// column: the note belongs under the button, never beside it.
+await draw({ ...fixState, fixResult: { ok: false, reason: 'failed' } }, false, 0);
+const stacked = await json(`({
+  button: window.__ui.box('#fix-button'),
+  note: window.__ui.box('#fix-note'),
+  over: window.__ui.overflow(),
+})`);
+check(
+  'the note sits under the button in the same column',
+  stacked.button && stacked.note && stacked.note.top >= stacked.button.bottom - 0.5 && Math.abs(stacked.note.left - stacked.button.left) <= 1,
+  JSON.stringify(stacked),
+);
+check('the well with both lines in it stays inside the column', stacked.over.length === 0, JSON.stringify(stacked.over));
 
 // ── the shots ──────────────────────────────────────────────────────────────
 
