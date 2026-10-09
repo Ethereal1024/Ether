@@ -29,6 +29,12 @@ const el = {
   restartAdbLabel: $('restart-adb-label'),
   moreLabel: $('more-label'),
   hPath: $('h-path'),
+  hStartup: $('h-startup'),
+  chkAtLogin: $('set-at-login'),
+  chkAtLoginLabel: $('set-at-login-label'),
+  chkAutoConnect: $('set-auto-connect'),
+  chkAutoConnectLabel: $('set-auto-connect-label'),
+  startupNote: $('startup-note'),
   hCounts: $('h-counts'),
   hRelated: $('h-related'),
   hPorts: $('h-ports'),
@@ -75,6 +81,13 @@ const LINK_NODES = { usb: $('link-usb'), tcp: $('link-tcp') };
 // ── state ───────────────────────────────────────────────────────────────────
 
 let labels = {};
+/** What the main process says about the two switches in Details → Startup.  The default
+ * is "nothing on", which is also what a payload that predates the settings carries. */
+let settings = { autoConnect: false, launchAtLogin: false, error: false };
+/** A setting change the main process itself refused (an IPC that rejected), until the
+ * next payload replaces it.  The refusal is drawn where the switch is, not in the
+ * sentence under the link. */
+let settingsNote = '';
 /** The frame drawn before anything arrives. It is the truth and not a placeholder:
  * the main process is creating the controller, which on a fresh machine can take a
  * while, so the first paint already says the app is working and the button is off. */
@@ -160,6 +173,19 @@ function render() {
   text(el.kClient, labels.clientRole ?? 'Client');
   text(el.kHost, labels.hostRole ?? 'Host');
   text(el.kAdb, 'adb');
+
+  // The two switches the user owns.  `launchAtLogin` is not ours to remember: the main
+  // process asks the OS, so the switch cannot go on claiming the app opens at login
+  // after the user removed the entry themselves.  A change the OS refused is one line
+  // under them, and the switch keeps showing what is actually true.
+  text(el.hStartup, labels.startup ?? 'Startup');
+  text(el.chkAtLoginLabel, labels.launchAtLogin ?? '');
+  text(el.chkAutoConnectLabel, labels.autoConnect ?? '');
+  el.chkAtLogin.checked = Boolean(settings.launchAtLogin);
+  el.chkAutoConnect.checked = Boolean(settings.autoConnect);
+  const note = settingsNote || (settings.error ? (labels.startupError ?? '') : '');
+  text(el.startupNote, note);
+  el.startupNote.hidden = !note;
 
   // The two rows of what is actually plugged in. The PC row says what the program on
   // this machine is *for*; which program it is belongs in Related software, further down.
@@ -302,9 +328,32 @@ function render() {
 function apply(payload) {
   if (!payload) return;
   if (payload.labels) labels = payload.labels;
+  // A payload is the newest word on the switches too, so it also clears a refusal the
+  // previous *verb* reported — the state drawn is then the one the main process just
+  // asked the OS for.
+  if (payload.settings) {
+    settings = payload.settings;
+    settingsNote = '';
+  }
   if (payload.status) {
     status = payload.status;
     failure = '';   // a fresh status from the main process supersedes a failed verb
+  }
+  render();
+}
+
+/**
+ * One switch.  Like a verb it is never silent: an invoke that rejects becomes the line
+ * under the switches, and a change the main process could not make comes back in the
+ * payload itself.  It does not lock the main button — the link is not what it touches.
+ */
+async function setSetting(key, value) {
+  settingsNote = '';
+  render();
+  try {
+    apply(await api.setSetting({ key, value }));
+  } catch (e) {
+    settingsNote = String(e?.message ?? e);
   }
   render();
 }
@@ -350,6 +399,11 @@ el.button.addEventListener('click', () => {
 });
 
 el.restartAdb.addEventListener('click', () => void run(() => api.restartAdb()));
+
+// The switches ask the main process on every change — never a local flip it might not
+// have honoured.  They are drawn again from the payload that comes back.
+el.chkAtLogin.addEventListener('change', () => void setSetting('launchAtLogin', el.chkAtLogin.checked));
+el.chkAutoConnect.addEventListener('change', () => void setSetting('autoConnect', el.chkAutoConnect.checked));
 
 el.measure.addEventListener('click', () => {
   el.measure.disabled = true;

@@ -781,3 +781,37 @@ body {
     border: 1px solid ButtonText;
   }
 }
+
+/* ── 11. the two switches in Details → Startup ──────────────────────────── */
+
+/* A switch is the platform's own checkbox and nothing else: a native box, the window's
+   one accent colour when it is on, and its label on the same line.  Drawing a track and
+   a thumb of our own would mean teaching the keyboard and the screen reader what it is;
+   this window has no script for that, and does not need one. */
+.switch {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  cursor: pointer;
+}
+
+.switch input {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--ok);
+}
+
+.switch span {
+  color: var(--text);
+  font-size: var(--fs-body);
+}
+
+/* The one line that appears when a setting could not be changed: it belongs under the
+   switches it is about, in the tone of something that needs the user. */
+.note {
+  margin: 0;
+  color: var(--warn);
+  font-size: var(--fs-label);
+}

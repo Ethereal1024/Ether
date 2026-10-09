@@ -61,6 +61,7 @@ interface FakeEl {
   className: string;
   hidden: boolean;
   disabled: boolean;
+  checked: boolean;
   title: string;
   scrollTop: number;
   scrollHeight: number;
@@ -77,14 +78,18 @@ interface FakeEl {
   };
   addEventListener(event: string, fn: () => void): void;
   click(): void;
+  /** Move a checkbox the way the platform does: set it, then fire `change`. */
+  check(on: boolean): void;
 }
 
 interface Harness {
   el(id: string): FakeEl;
-  /** Push a status the way `api.onState` would. `labels` sticks until replaced. */
-  push(status: Push, labels?: UiLabels): void;
+  /** Push a payload the way `api.onState` would. `labels`/`settings` stick until replaced. */
+  push(status: Push, labels?: UiLabels, settings?: Push): void;
   settle(): Promise<void>;
-  calls: { start: number; stop: number; restartAdb: number; measure: number };
+  calls: { start: number; stop: number; restartAdb: number; measure: number; setSetting: number };
+  /** The last `{key, value}` a switch sent to the main process. */
+  lastSetting: { key?: string; value?: unknown };
   /** Let the gated `start`/`stop` promise resolve. */
   release(): void;
   clipboard: string[];
@@ -103,7 +108,7 @@ interface Harness {
  * controller is still being built; `startFails` makes a verb throw, which has to reach
  * the sentence the user reads.
  */
-function harness(opts: { stateFails?: boolean; startFails?: boolean } = {}): Harness {
+function harness(opts: { stateFails?: boolean; startFails?: boolean; setSettingFails?: boolean } = {}): Harness {
   const htmlIds = new Set([...htmlSrc.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string));
   const requested = new Set<string>();
   const els = new Map<string, FakeEl>();
@@ -118,6 +123,7 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean } = {}): Har
       className: '',
       hidden: false,
       disabled: false,
+      checked: false,
       title: '',
       scrollTop: 0,
       scrollHeight: 0,
@@ -143,6 +149,12 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean } = {}): Har
       click() {
         const fn = handlers.get('click');
         assert.ok(fn, `#${id} has no click handler`);
+        fn();
+      },
+      check(on) {
+        node.checked = on;
+        const fn = handlers.get('change');
+        assert.ok(fn, `#${id} has no change handler`);
         fn();
       },
     };
@@ -176,7 +188,7 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean } = {}): Har
     },
   };
 
-  const calls = { start: 0, stop: 0, restartAdb: 0, measure: 0 };
+  const calls = { start: 0, stop: 0, restartAdb: 0, measure: 0, setSetting: 0 };
   let release: () => void = () => undefined;
   const gate = () =>
     new Promise<void>((resolve) => {
@@ -185,6 +197,8 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean } = {}): Har
 
   let onState: ((payload: unknown) => void) | undefined;
   let lastLabels: UiLabels | undefined;
+  let lastSettings: Push | undefined;
+  const lastSetting: { key?: string; value?: unknown } = {};
   const api = {
     state: async () => {
       if (opts.stateFails) throw new Error('controller is not ready yet');
@@ -209,6 +223,18 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean } = {}): Har
       calls.measure += 1;
       return { ok: true, mbps: 103.1 };
     },
+    /** The main process answers a switch with the whole payload, so the window draws
+     * what happened — here, what was asked for. */
+    setSetting: async (o: { key?: string; value?: unknown }) => {
+      calls.setSetting += 1;
+      lastSetting.key = o.key;
+      lastSetting.value = o.value;
+      if (opts.setSettingFails) throw new Error('the settings file is read-only');
+      const next: Push = { autoConnect: false, launchAtLogin: false, error: false, ...(lastSettings ?? {}) };
+      if (o.key === 'autoConnect') next.autoConnect = o.value === true;
+      if (o.key === 'launchAtLogin') next.launchAtLogin = o.value === true;
+      return { status: st(), settings: next };
+    },
     onState: (cb: (payload: unknown) => void) => {
       onState = cb;
     },
@@ -229,18 +255,21 @@ function harness(opts: { stateFails?: boolean; startFails?: boolean } = {}): Har
       assert.ok(e, `#${id} was never rendered`);
       return e;
     },
-    push: (status, labels) => {
+    push: (status, labels, settings) => {
       assert.ok(onState, 'the renderer never subscribed with onState');
-      // The main process pushes the whole label set when it changes; the channel
-      // carries `{status, labels}` — never a bare status, and no language field.
+      // The main process pushes the whole payload when anything changes: `status`,
+      // the label set, and what the two switches are set to. The channel never
+      // carries a bare status, and no language field.
       if (labels) lastLabels = labels;
-      onState?.({ status, labels: lastLabels });
+      if (settings) lastSettings = settings;
+      onState?.({ status, labels: lastLabels, settings: lastSettings });
     },
     settle: async () => {
       await new Promise((r) => setImmediate(r));
       await new Promise((r) => setImmediate(r));
     },
     calls,
+    lastSetting,
     release: () => release(),
     clipboard,
     root: documentElement,
@@ -671,6 +700,71 @@ test('Related software is the one block that names another program, and only fro
   assert.match(h.el('v-adb').textContent, /\[conflict\]$/);
 });
 
+// ── the two settings ────────────────────────────────────────────────────────
+
+test('the startup switches draw the state the OS reports, and send every change back', async () => {
+  const h = harness();
+  await h.settle();
+  h.push(st(), labels, { autoConnect: true, launchAtLogin: false, error: false });
+
+  assert.equal(h.el('h-startup').textContent, labels.startup);
+  assert.equal(h.el('set-at-login-label').textContent, labels.launchAtLogin);
+  assert.equal(h.el('set-auto-connect-label').textContent, labels.autoConnect);
+  // Two switches, two different kinds of truth: one is the OS's own login item, the
+  // other is the line we write ourselves. The payload says which is which.
+  assert.equal(h.el('set-auto-connect').checked, true);
+  assert.equal(h.el('set-at-login').checked, false);
+  assert.equal(h.el('startup-note').hidden, true);
+
+  h.el('set-at-login').check(true);
+  await h.settle();
+  assert.equal(h.calls.setSetting, 1);
+  assert.deepEqual(h.lastSetting, { key: 'launchAtLogin', value: true });
+  // The answer is the whole payload, so the switch is drawn from what the main process
+  // reports and never from what the click asked for.
+  assert.equal(h.el('set-at-login').checked, true);
+
+  h.el('set-auto-connect').check(false);
+  await h.settle();
+  assert.equal(h.calls.setSetting, 2);
+  assert.deepEqual(h.lastSetting, { key: 'autoConnect', value: false });
+  assert.equal(h.el('set-auto-connect').checked, false);
+});
+
+test('a setting the OS will not take is one line where it was asked for', async () => {
+  const h = harness();
+  await h.settle();
+  h.push(st(), labels, { autoConnect: false, launchAtLogin: false, error: true });
+  assert.equal(h.el('startup-note').hidden, false);
+  assert.equal(h.el('startup-note').textContent, labels.startupError);
+  // Not the sentence under the link: the link is fine, the switch is what failed.
+  assert.equal(h.el('status-line').textContent, '');
+
+  h.push(st(), labels, { autoConnect: false, launchAtLogin: false, error: false });
+  assert.equal(h.el('startup-note').hidden, true);
+  assert.equal(h.el('startup-note').textContent, '');
+});
+
+test('a setting change that cannot even be sent is the line under the switches', async () => {
+  const h = harness({ setSettingFails: true });
+  await h.settle();
+  h.el('set-auto-connect').check(true);
+  await h.settle();
+  assert.equal(h.calls.setSetting, 1);
+  assert.equal(h.el('startup-note').hidden, false);
+  assert.equal(h.el('startup-note').textContent, 'the settings file is read-only');
+  assert.equal(h.el('status-line').textContent, '');
+});
+
+test('a payload with no settings draws the switches off rather than failing', async () => {
+  const h = harness();
+  await h.settle();
+  h.push(st(), labels); // an older payload: no `settings` field at all
+  assert.equal(h.el('set-at-login').checked, false);
+  assert.equal(h.el('set-auto-connect').checked, false);
+  assert.equal(h.el('startup-note').hidden, true);
+});
+
 // ── the files themselves ────────────────────────────────────────────────────
 
 test('every word on screen comes from messages.ts, never from the markup', () => {
@@ -741,10 +835,10 @@ test('the window is one fixed size, and the renderer never touches it', () => {
 
 test('every channel the preload exposes is one the main process answers', () => {
   const exposed = [...preloadSrc.matchAll(/ipcRenderer\.invoke\('([^']+)'/g)].map((m) => m[1] as string);
-  assert.deepEqual(exposed, ['state', 'start', 'stop', 'restart-adb', 'measure']);
+  assert.deepEqual(exposed, ['state', 'start', 'stop', 'restart-adb', 'measure', 'set-setting']);
 
   const used = [...new Set([...rendererCode.matchAll(/api\.([A-Za-z]+)\(/g)].map((m) => m[1] as string))].sort();
-  assert.deepEqual(used, ['measure', 'onState', 'restartAdb', 'start', 'state', 'stop']);
+  assert.deepEqual(used, ['measure', 'onState', 'restartAdb', 'setSetting', 'start', 'state', 'stop']);
   // `onState` is the push subscription; the rest are the invoke channels above.
   const camel = (verb: string) => verb.replace(/-(\w)/g, (_, c: string) => c.toUpperCase());
   for (const verb of used.filter((v) => v !== 'onState')) {

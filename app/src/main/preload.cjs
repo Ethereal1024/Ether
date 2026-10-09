@@ -15,6 +15,13 @@ contextBridge.exposeInMainWorld('ether', {
   restartAdb: () => ipcRenderer.invoke('restart-adb'),
   measure: (o) => ipcRenderer.invoke('measure', o),
   /**
+   * One switch in Details → Startup: `{ key, value }`, where key is `launchAtLogin`
+   * or `autoConnect`.  Answers with the same `{status, labels, settings}` payload the
+   * other verbs return — never a bare acknowledgement, so the switch is drawn from
+   * what actually happened rather than from what was asked for.
+   */
+  setSetting: (o) => ipcRenderer.invoke('set-setting', o),
+  /**
    * Push channel: the main process sends the same `{status, labels}` payload the
    * invoke verbs return, whenever the status changes.
    */

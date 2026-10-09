@@ -129,6 +129,15 @@ export interface UiLabels {
   unknown: string;
   listening: string;
   notDetected: string;
+  /** Details → Startup: the two things the app may do before the user asks, and the
+   * one line it says when the OS would not take one of them. */
+  startup: string;
+  launchAtLogin: string;
+  autoConnect: string;
+  startupError: string;
+  /** The comment the desktop's own startup-applications list shows — the one sentence
+   * of ours that is read outside this window. */
+  loginItemComment: string;
 }
 
 export const UI: UiLabels = {
@@ -172,6 +181,11 @@ export const UI: UiLabels = {
   unknown: 'unknown',
   listening: 'listening on',
   notDetected: 'not detected',
+  startup: 'Startup',
+  launchAtLogin: 'Open Ether when you sign in',
+  autoConnect: 'Connect the wired link on launch',
+  startupError: 'The startup setting could not be changed',
+  loginItemComment: 'Wired (adb) channel for the streaming client on this PC',
 };
 
 export function uiLabels(): UiLabels {

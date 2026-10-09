@@ -115,6 +115,24 @@
           </summary>
 
           <div class="sheet">
+            <!-- The two things this app may do before the user asks, each a native
+                 checkbox: the platform's own control, operable from the keyboard and
+                 announced with its own state, with no script behind it. One is the
+                 desktop's startup entry, the other a line in `settings.json`; both are
+                 off until the user says otherwise. -->
+            <section class="block">
+              <h2 id="h-startup" class="block-title"></h2>
+              <label class="switch">
+                <input id="set-at-login" type="checkbox" />
+                <span id="set-at-login-label"></span>
+              </label>
+              <label class="switch">
+                <input id="set-auto-connect" type="checkbox" />
+                <span id="set-auto-connect-label"></span>
+              </label>
+              <p id="startup-note" class="note" hidden></p>
+            </section>
+
             <section class="block">
               <h2 id="h-counts" class="block-title"></h2>
               <div class="stats">

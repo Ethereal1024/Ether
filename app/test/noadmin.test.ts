@@ -6,7 +6,10 @@
 //   * the app *prints* the two udev commands and never runs them — the user runs
 //     them, in the OS, once;
 //   * nothing escalates on its own: no sudo/pkexec process, no `shell: true`, no
-//     writing into /etc or /usr, no registry/PATH edits, no autostart;
+//     writing into /etc or /usr, no registry/PATH edits, and no *system-wide*
+//     startup entry.  The one file this app ever writes outside its own data dir is
+//     the per-user startup entry the user turns on by name in the window (Details →
+//     Startup) — their file, in their own config dir, in exactly one module;
 //   * the one privileged-looking sentence is the §3.4 row-3 hint, and it lives in
 //     exactly one file, which is the only place allowed to know about platforms.
 //
@@ -66,7 +69,24 @@ test('the app never writes outside its own data dir', () => {
     scan(/(writeFile|writeFileSync|mkdir|mkdirSync|appendFile\w*|rm|rmSync|unlink\w*|cp|copyFile\w*)\s*\(\s*['"`](\/etc\/|\/usr\/|\/lib\/|\/run\/|[A-Za-z]:\\\\)/),
     [],
   );
-  assert.deepEqual(scan(/\b(reg\s+add|HKEY_|setx\b|setPath\b|\.rdf\/rules|autostart|\.config\/autostart)/i), []);
+  assert.deepEqual(scan(/\b(reg\s+add|HKEY_|setx\b|setPath\b|\.rdf\/rules)/i), []);
+
+  // The one exception, and it is a narrow one: the per-user startup entry of the
+  // desktop session the user is already in, written only when they turn the switch in
+  // the window on.  It is their own file in their own config dir — it asks for no
+  // rights, changes no PATH, and touches no other account.  Naming that directory is
+  // allowed in the one module that writes it, and nowhere else, so a second place that
+  // knows the path is a deliberate change rather than an accident.
+  const mayNameStartupDir = ['src/main/startup.ts'];
+  const startup = scan(/autostart|\.config\/autostart/i);
+  assert.ok(startup.length > 0, 'the startup entry is written somewhere: name it in one file');
+  for (const hit of startup) {
+    const file = hit.slice(0, hit.indexOf(':'));
+    assert.ok(mayNameStartupDir.includes(file), `the per-user startup dir is named in ${file}: ${hit}`);
+  }
+  // ...while the system-wide ones stay forbidden everywhere, because those are what an
+  // installer with admin would write and this app has no installer and no admin.
+  assert.deepEqual(scan(/\/etc\/xdg\/autostart|\/usr\/share\/applications/i), []);
 });
 
 test('the privileged text lives in exactly one file, and only as text to print', () => {

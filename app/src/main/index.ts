@@ -8,12 +8,42 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
 import { Controller, type Status } from './controller.js';
 import { uiLabels } from './messages.js';
+import { currentPlat, userDataDir } from './platform.js';
+import {
+  installStartup,
+  readSettings,
+  removeStartup,
+  shouldAutoConnect,
+  startupDir,
+  startupEntry,
+  startupInstalled,
+  writeSettings,
+  type Settings,
+} from './startup.js';
 
 let win: BrowserWindow | undefined;
 let controller: Controller | undefined;
 let controllerReady: Promise<Controller> | undefined;
 let quitting = false;
 let lastStatus: Status | undefined;
+
+/** The controller's data dir, so the settings sit next to the state.json it writes. */
+const DATA_DIR = userDataDir();
+const PLAT = currentPlat();
+
+/** The settings we own. Read on the way up, written when a switch in the window moves. */
+let settings: Settings = { autoConnect: false };
+/** True while the last write of a setting failed — the window then says so, once. */
+let settingsError = false;
+/** Whether the OS currently has us in the session's own login items. */
+let loginItemOn = false;
+/**
+ * The auto-connect attempt: at most one per launch.  Armed when the controller is
+ * ready and given up for good as soon as the user presses a button themselves or the
+ * link moves past idle — never re-armed while the app is open, so the switch means
+ * "when you open Ether", not "whenever a cable appears".
+ */
+let autoConnectPending = false;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -167,10 +197,72 @@ function push(s: Status): void {
   // Same shape as the invoke handlers below: the renderer applies one payload
   // type from both channels, so a status change and its labels never diverge.
   if (win && !win.isDestroyed()) win.webContents.send('status', payload(s));
+  autoConnectStep(s);
 }
 
 function payload(s: Status) {
-  return { status: s, labels: uiLabels() };
+  return {
+    status: s,
+    labels: uiLabels(),
+    // What the two switches in Details → Startup draw.  `launchAtLogin` is the OS's
+    // own answer (re-read at startup and after every write), never a copy we keep,
+    // and `error` is set while the last change could not be made.
+    settings: { autoConnect: settings.autoConnect, launchAtLogin: loginItemOn, error: settingsError },
+  };
+}
+
+/**
+ * "Open Ether when you sign in", per platform.  On Linux it is the user's own startup
+ * entry (startup.ts writes it); on macOS and Windows the same fact lives in the OS and
+ * Electron is the only thing that can read or write it.  Either way the state is asked
+ * for, never remembered across launches.
+ */
+function refreshLoginItem(): void {
+  try {
+    loginItemOn =
+      PLAT === 'linux'
+        ? startupInstalled(startupDir(process.env))
+        : app.getLoginItemSettings().openAtLogin === true;
+  } catch {
+    loginItemOn = false; // an OS that will not answer has not enabled anything
+  }
+}
+
+async function setLoginItem(on: boolean): Promise<void> {
+  if (PLAT === 'linux') {
+    // `$APPIMAGE` when there is one: inside the mounted image `process.execPath` is a
+    // temporary path that is gone after a reboot, so an entry pointing at it would do
+    // nothing at the next login.
+    const exec = process.env.APPIMAGE ?? process.execPath;
+    const args = process.defaultApp ? [app.getAppPath()] : [];
+    if (on) await installStartup(startupDir(process.env), startupEntry({ exec, args, comment: uiLabels().loginItemComment }));
+    else await removeStartup(startupDir(process.env));
+    return;
+  }
+  // Windows: an unpackaged run *is* `electron`, so the app path has to travel with it;
+  // a packaged app is its own entry point.  macOS takes the flag alone.
+  app.setLoginItemSettings(
+    PLAT === 'win32'
+      ? { openAtLogin: on, path: process.execPath, args: process.defaultApp ? [app.getAppPath()] : [] }
+      : { openAtLogin: on },
+  );
+}
+
+/**
+ * The one auto-connect attempt: made when the app already knows there is a usable
+ * device, and dropped as soon as the status says anything else.  A launch with no cable
+ * therefore stays *armed* — plugging the device in is the thing the switch was for —
+ * while a link that came up, or a state that needs the user, ends the attempt.
+ */
+function autoConnectStep(s: Status): void {
+  if (!autoConnectPending) return;
+  if (shouldAutoConnect(settings, s)) {
+    autoConnectPending = false;
+    process.stdout.write('[app] auto-connect: the device is ready, starting the wired link\n');
+    void controller?.up().catch((e) => process.stdout.write(`[app] auto-connect failed: ${(e as Error).message}\n`));
+    return;
+  }
+  if (s.state !== 'idle') autoConnectPending = false;
 }
 
 /**
@@ -216,16 +308,19 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('start', async () => {
+    autoConnectPending = false; // the user took over: no attempt of ours may follow it
     const c = await requireController();
     return payload(await c.up());
   });
 
   ipcMain.handle('stop', async () => {
+    autoConnectPending = false;
     const c = await requireController();
     return payload(await c.down());
   });
 
   ipcMain.handle('restart-adb', async () => {
+    autoConnectPending = false;
     const c = await requireController();
     return payload(await c.restartAdb());
   });
@@ -233,6 +328,34 @@ function registerIpc(): void {
   ipcMain.handle('measure', async (_e, o: { seconds?: number; window?: number } = {}) => {
     const c = await requireController();
     return c.measure({ seconds: o.seconds ?? 5, window: o.window ?? 1024 });
+  });
+
+  /**
+   * One switch in Details → Startup.  A change that cannot be made is not an
+   * exception thrown at the window: the payload comes back with `error` set and the
+   * window says so where the switch is — the state it draws is then the state the OS
+   * actually reports, i.e. the switch shows what happened, not what was asked for.
+   */
+  ipcMain.handle('set-setting', async (_e, o: { key?: string; value?: unknown } = {}) => {
+    settingsError = false;
+    try {
+      if (o.key === 'autoConnect') {
+        settings = { ...settings, autoConnect: o.value === true };
+        await writeSettings(DATA_DIR, settings);
+        // Turning it off also cancels an attempt that has not happened yet.  Turning it
+        // on does not dial now: the switch is about the *next* launch.
+        if (!settings.autoConnect) autoConnectPending = false;
+      } else if (o.key === 'launchAtLogin') {
+        await setLoginItem(o.value === true);
+        refreshLoginItem();
+      } else {
+        throw new Error(`unknown setting '${String(o.key)}'`);
+      }
+    } catch (e) {
+      settingsError = true;
+      process.stdout.write(`[app] setting ${String(o.key)} failed: ${(e as Error).message}\n`);
+    }
+    return payload(lastStatus ?? controller?.status() ?? startingStatus());
   });
 }
 
@@ -269,6 +392,11 @@ if (!gotLock) {
 
   void app.whenReady().then(async () => {
     registerIpc();
+
+    // Before a payload can be built: `payload()` draws both of these.
+    settings = await readSettings(DATA_DIR);
+    refreshLoginItem();
+
     win = createWindow();
 
     // The window is up before the controller is, so say what the app is actually
@@ -283,6 +411,11 @@ if (!gotLock) {
       onStatus: (s) => push(s),
     });
     controller = await controllerReady;
+
+    // Armed only now: the statuses pushed while the controller was being built say
+    // "checking", and acting on one of those would disarm the attempt before it could
+    // be made.  The push at the end of this block is what makes the attempt.
+    autoConnectPending = settings.autoConnect;
 
     // The page is a local file loaded asynchronously, so it may already have
     // finished by the time adb answered: the push is what draws the first status,
