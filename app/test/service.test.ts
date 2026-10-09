@@ -13,9 +13,10 @@ import assert from 'node:assert/strict';
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { t } from '../src/main/messages.js';
 
@@ -26,6 +27,34 @@ const posixOnly = process.platform === 'win32' ? 'needs the POSIX sh adb stub' :
 // The pid-reuse guard reads /proc/<pid>/cmdline (cli.mjs); without /proc there is
 // nothing extra to test — the CLI falls back to the pid alone.
 const linuxOnly = !existsSync('/proc/self/cmdline') ? 'needs /proc/<pid>/cmdline' : false;
+
+/**
+ * Three tests in this file drive `--up` all the way to the tablet (the elfNoExec
+ * pair and the heartbeat one), and `--up` asks about Sunshine *before* it asks
+ * about the device: with nothing listening on the base port it stops at
+ * `noSunshine` and never reaches the stub adb at all.  On a developer's machine
+ * Sunshine is listening there; on a clean CI runner nothing is, which is how those
+ * three came to pass here and fail there.
+ *
+ * So own the port — the same move ports.test.ts makes for its own probes ("a port
+ * we own, so this holds whether or not Sunshine is running right now").  A real
+ * Sunshine that already holds it is left alone: to the tunnel the two are the same
+ * thing, a socket that accepts a connection on the base port.
+ */
+const SUNSHINE_BASE = 47989;
+let sunshineStub: net.Server | undefined;
+
+before(async () => {
+  sunshineStub = await new Promise<net.Server | undefined>((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(undefined)); // a real Sunshine has it
+    srv.listen(SUNSHINE_BASE, '127.0.0.1', () => resolve(srv));
+  });
+});
+
+after(async () => {
+  if (sunshineStub) await new Promise<void>((resolve) => sunshineStub?.close(() => resolve()));
+});
 
 /** The §13.8 key order; `status.json` adds its own three keys after it. */
 const FROZEN = ['state', 'device', 'adb', 'tcpMap', 'udpMap', 'stats', 'message', 'messageKey', 'hint', 'ports', 'channels', 'logs'];
