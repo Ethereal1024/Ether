@@ -423,11 +423,15 @@ test('--state ignores a service record whose heartbeat has gone stale', { skip: 
   }
 });
 
-test('--state ignores a record whose pid belongs to somebody else', { skip: posixOnly }, async () => {
+test('--state ignores a record whose pid belongs to somebody else', { skip: linuxOnly }, async () => {
   const dir = tmp();
   try {
     // A fresh heartbeat and a live pid — but this process is `node --test`, not
-    // `cli.mjs --serve`.  A recycled pid must not be mistaken for our service.
+    // `cli.mjs --serve`.  A recycled pid must not be mistaken for our service —
+    // and the only thing that tells the two apart is the command line behind the
+    // pid, which is /proc/<pid>/cmdline.  Without /proc (macOS, Windows) the CLI
+    // says so in its own words and falls back to the pid alone: there is nothing
+    // extra to test there, so this case is linuxOnly, not posixOnly.
     plantStatus(dir, process.pid, Date.now());
     const r = run(['--state', '--json'], env(dir, 'ok'));
     assert.equal(r.status, 1, `expected exit 1: ${r.stderr}`);

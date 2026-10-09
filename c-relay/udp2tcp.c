@@ -63,6 +63,9 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>   /* _NSGetExecutablePath: Darwin has no /proc/self/exe */
+#endif
 
 #define MAXFRAME   65535u
 #define RBUF_SIZE  (2u + MAXFRAME)
@@ -537,15 +540,42 @@ static uint32_t fnv1a(const unsigned char *d, size_t n) {
   return h;
 }
 
-static int test_mode(int seconds) {
+/**
+ * The self-test re-execs *this* binary three times (host, device, echo), so it has
+ * to know its own path.  Linux answers that with /proc/self/exe.  Darwin has no
+ * /proc and answers it with _NSGetExecutablePath, which may hand back a symlink —
+ * exec follows it, so that is fine, but realpath() is tried first so the log line
+ * names the real file.  Last resort is argv[0]: how the caller spelled it, which
+ * works for the tests and for ./build.sh but not for a PATH lookup.
+ *
+ * Why it matters: macOS is a release platform and both ./build.sh and the interop
+ * suite end in `--test`.  Dying with "cannot resolve own path" there made a
+ * portable relay look broken on one of the three platforms we ship.
+ */
+static void own_path(char *buf, size_t n, const char *argv0) {
+  ssize_t sn = readlink("/proc/self/exe", buf, n - 1);
+  if (sn > 0) { buf[sn] = '\0'; return; }
+#if defined(__APPLE__)
+  {
+    char raw[4096];
+    uint32_t sz = (uint32_t) sizeof raw;
+    if (_NSGetExecutablePath(raw, &sz) == 0) {
+      if (realpath(raw, buf)) return;
+      if (strlen(raw) < n) { strcpy(buf, raw); return; }
+    }
+  }
+#endif
+  if (argv0 && argv0[0] && realpath(argv0, buf)) return;
+  die("cannot resolve own path");
+}
+
+static int test_mode(int seconds, const char *argv0) {
   uint16_t taken[3] = { 0, 0, 0 };
   uint16_t p_host_listen = pick_free_tcp_port(taken, 0); taken[0] = p_host_listen;
   uint16_t p_device_udp  = pick_free_tcp_port(taken, 1); taken[1] = p_device_udp;
   uint16_t p_echo_udp    = pick_free_tcp_port(taken, 2); taken[2] = p_echo_udp;
   char self[4096];
-  ssize_t sn = readlink("/proc/self/exe", self, sizeof self - 1);
-  if (sn <= 0) die("cannot resolve own path");
-  self[sn] = '\0';
+  own_path(self, sizeof self, argv0);
 
   char hs[64], hc[64], dc[64], du[64];
   snprintf(hs, sizeof hs, "127.0.0.1:%u", p_host_listen);
@@ -798,7 +828,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atoi(argv[++i]);
     else usage();
   }
-  if (test) return test_mode(seconds);
+  if (test) return test_mode(seconds, argv[0]);
   if (echo) { char eh[64]; uint16_t ep; split_hostport(echo_addr, eh, sizeof eh, &ep); return echo_mode(eh, ep); }
   if (bench) { char bh[64]; uint16_t bp; split_hostport(bench_addr, bh, sizeof bh, &bp); return bench_mode(bh, bp, seconds, frame, window); }
   if (device && udp_listen && tcp_connect) {

@@ -28,6 +28,12 @@ import {
   udpListenerPorts,
 } from '../src/main/ports.js';
 
+// Sunshine's config path is assembled with path.join, so its separators are the
+// host's: the literals in the layout test below are POSIX paths, and on Windows the
+// same call answers `\home\u\.config\sunshine\...`.  (The $SUNSHINE_CONF override is
+// returned verbatim and is checked on every host.)
+const posixOnly = process.platform === 'win32' ? 'POSIX path separators' : false;
+
 function listenTcp(port = 0): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer(() => {});
@@ -84,8 +90,14 @@ test('portsForBase derives the four TCP and three UDP channels Sunshine uses', (
   assert.equal(UDP_OFFSETS.length, 3);
 });
 
-test('sunshineConfPath honours $SUNSHINE_CONF and per-platform defaults', () => {
+test('sunshineConfPath lets $SUNSHINE_CONF win on every platform', () => {
+  // The override is handed back exactly as it came in, so this half says nothing
+  // about the host's separators and runs everywhere.
   assert.equal(sunshineConfPath('linux', { SUNSHINE_CONF: '/custom/s.conf' }), '/custom/s.conf');
+  assert.equal(sunshineConfPath('win32', { SUNSHINE_CONF: 'C:\\custom\\s.conf' }), 'C:\\custom\\s.conf');
+});
+
+test("sunshineConfPath builds each platform's default layout", { skip: posixOnly }, () => {
   const linux = sunshineConfPath('linux', { HOME: '/home/u', XDG_CONFIG_HOME: '' });
   assert.equal(linux, '/home/u/.config/sunshine/sunshine.conf');
   const xdg = sunshineConfPath('linux', { HOME: '/home/u', XDG_CONFIG_HOME: '/home/u/.cfg' });

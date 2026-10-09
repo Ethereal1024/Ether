@@ -24,10 +24,14 @@ const srcMain = path.join(appRoot, 'src', 'main');
 const srcRenderer = path.join(appRoot, 'src', 'renderer');
 
 function sources(dir: string, keep: (f: string) => boolean): Array<[string, string]> {
+  // Always spelled with `/`, whatever the host uses: these names are asserted on
+  // ("the privileged text lives in exactly one file"), and on Windows the same walk
+  // yields `src\main\platform.ts`, which would fail an assertion about content.
+  const rel = path.relative(appRoot, dir).split(path.sep).join('/');
   return readdirSync(dir)
     .filter(keep)
     .sort()
-    .map((f) => [path.join(path.relative(appRoot, dir), f), readFileSync(path.join(dir, f), 'utf8')] as [string, string]);
+    .map((f) => [path.posix.join(rel, f), readFileSync(path.join(dir, f), 'utf8')] as [string, string]);
 }
 
 const appSources: Array<[string, string]> = [

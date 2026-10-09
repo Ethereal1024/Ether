@@ -161,8 +161,13 @@ test('extractZip writes files, restores the executable bit and returns the paths
     const written = await extractZip(zip, dir);
     assert.equal(written.length, 2);
     assert.ok(existsSync(path.join(dir, 'platform-tools', 'adb')));
-    const mode = statSync(path.join(dir, 'platform-tools', 'adb')).mode & 0o777;
-    assert.equal(mode, 0o755);
+    if (process.platform !== 'win32') {
+      // NTFS has no unix permission bits: node's chmod only toggles the
+      // read-only flag there, so the executable bit can only be asserted on
+      // POSIX hosts.
+      const mode = statSync(path.join(dir, 'platform-tools', 'adb')).mode & 0o777;
+      assert.equal(mode, 0o755);
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

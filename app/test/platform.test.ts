@@ -150,7 +150,11 @@ test('udevHint is two copy-pasteable commands with a real vendor id, not a tutor
   assert.throws(() => udevHint(''), /4 hex digits/);
 });
 
-test('vendorIdFromSysfs finds the device by serial, never by guessing', () => {
+// The fake sysfs node `3-2:1.0` (an interface, which has no serial) is the point of
+// this test and Windows cannot have a colon in a file name at all.  sysfs is a Linux
+// tree anyway; on a POSIX host the directory is real and the assertion is about the
+// reader, so that is where it runs.
+test('vendorIdFromSysfs finds the device by serial, never by guessing', { skip: posixOnly }, () => {
   const root = tmpDir();
   try {
     mkdirSync(path.join(root, '1-1'), { recursive: true });
