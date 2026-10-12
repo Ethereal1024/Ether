@@ -75,6 +75,42 @@ export async function writeSettings(dataDir: string, s: Settings): Promise<void>
   await rename(tmp, settingsPath(dataDir));
 }
 
+/**
+ * What the window's Startup switches are drawn from — the shell's own state, in one
+ * place, so the payload stays a hand-over and not a decision.
+ *
+ * `waiting` is the one field that is not a setting.  It is the attempt the switch asked
+ * for, still unspent: `true` from the arming until it dialled, the user took over, or the
+ * link turned out to be someone else's already.  The window needs it because the chip
+ * cannot draw it — an armed app and an app nobody asked to connect are both "Off", and a
+ * card that cannot tell those apart is how a working switch reads as a missing one.
+ */
+export interface StartupFields {
+  autoConnect: boolean;
+  keepRunning: boolean;
+  launchAtLogin: boolean;
+  error: boolean;
+  waiting: boolean;
+}
+
+export function startupFields(o: {
+  settings: Settings;
+  /** The OS's own answer about the login item, never a copy we keep. */
+  launchAtLogin: boolean;
+  /** Whether the last write of a setting failed. */
+  error: boolean;
+  /** The launch's attempt, when the shell has built one yet. */
+  attempt?: { pending: boolean };
+}): StartupFields {
+  return {
+    autoConnect: o.settings.autoConnect,
+    keepRunning: o.settings.keepRunning,
+    launchAtLogin: o.launchAtLogin,
+    error: o.error,
+    waiting: o.attempt?.pending === true,
+  };
+}
+
 // ── the desktop's startup entry (Linux) ─────────────────────────────────────
 
 /** The entry's file name, and the variable that pins the directory for a test run. */

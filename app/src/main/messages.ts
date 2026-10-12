@@ -141,6 +141,11 @@ export interface UiLabels {
   startup: string;
   launchAtLogin: string;
   autoConnect: string;
+  /** What the card says while the auto-connect attempt has not dialled yet.  Not a
+   * switch word: the chip reads "Off" for a waiting app exactly as it does for one
+   * nobody asked to connect, so this is the only place that tells the two apart.  A
+   * state, not an explanation: the chip says Off, this says which switch is acting. */
+  autoConnectWaiting: string;
   startupError: string;
   /** The third row of that block: closing the window must not drop the link. */
   keepRunning: string;
@@ -209,6 +214,7 @@ export const UI: UiLabels = {
   startup: 'Startup',
   launchAtLogin: 'Open Ether when you sign in',
   autoConnect: 'Connect the wired link on launch',
+  autoConnectWaiting: 'Connect on launch: waiting for the device',
   startupError: 'The startup setting could not be changed',
   keepRunning: 'Keep the link running when the window is closed',
   loginItemComment: 'Wired (adb) channel for the streaming client on this PC',

@@ -29,6 +29,7 @@ import {
   startupDir,
   startupEntry,
   startupEntryPath,
+  startupFields,
   startupInstalled,
   windowCloseAction,
   writeSettings,
@@ -456,6 +457,43 @@ test('the switch off at launch arms nothing at all', () => {
 
   attempt.step({ state: 'idle', device: { state: 'device' } });
   assert.equal(dials, 0);
+});
+
+// ── what the window is told about the switch ────────────────────────────────
+
+test('the window is told the switch is on *and* whether that attempt is still waiting', () => {
+  // The reason the payload carries a field that is not a setting at all.  An armed app and
+  // an app nobody asked to connect draw the same card — chip off, button "Start wired
+  // link" — so without `waiting` the window cannot tell the user the feature is doing
+  // anything, and a working switch reads as a missing one.
+  const os = { launchAtLogin: true, error: false };
+
+  assert.deepEqual(startupFields({ settings: ON, ...os, attempt: { pending: true } }), {
+    autoConnect: true,
+    keepRunning: true,
+    launchAtLogin: true,
+    error: false,
+    waiting: true,
+  });
+
+  // Once it dialled, once the user took over, or with the switch off, there is no promise
+  // left to make: the field goes quiet on its own, with nothing for the shell to clear.
+  assert.equal(startupFields({ settings: ON, ...os, attempt: { pending: false } }).waiting, false);
+  assert.equal(startupFields({ settings: OFF, ...os, attempt: { pending: false } }).waiting, false);
+
+  // The shell reads the settings *before* it builds the attempt, so the first payload of a
+  // launch has no attempt to read.  "Nobody has told me" must not draw as "waiting".
+  assert.equal(startupFields({ settings: ON, ...os }).waiting, false);
+  assert.equal(startupFields({ settings: ON, ...os, attempt: undefined }).waiting, false);
+
+  // The switch fields are the settings themselves, passed through rather than reinterpreted.
+  assert.deepEqual(startupFields({ settings: OFF, ...os }), {
+    autoConnect: false,
+    keepRunning: true,
+    launchAtLogin: true,
+    error: false,
+    waiting: false,
+  });
 });
 
 // ── waiting for the event, instead of asking 30 times a minute ──────────────

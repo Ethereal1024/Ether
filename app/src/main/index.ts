@@ -52,6 +52,7 @@ import {
   removeStartup,
   startupDir,
   startupEntry,
+  startupFields,
   startupInstalled,
   windowCloseAction,
   writeSettings,
@@ -568,13 +569,15 @@ function payload(s: Status) {
     labels: uiLabels(),
     // What the switches in Details → Startup draw.  `launchAtLogin` is the OS's own
     // answer (re-read at startup and after every write), never a copy we keep, and
-    // `error` is set while the last change could not be made.
-    settings: {
-      autoConnect: settings.autoConnect,
-      keepRunning: settings.keepRunning,
+    // `error` is set while the last change could not be made.  `waiting` is the one
+    // field that is not a switch: the attempt the auto-connect switch asked for, until it
+    // dials — see `startupFields` for why the window cannot do without it.
+    settings: startupFields({
+      settings,
       launchAtLogin: loginItemOn,
       error: settingsError,
-    },
+      attempt: autoConnect,
+    }),
   };
 }
 

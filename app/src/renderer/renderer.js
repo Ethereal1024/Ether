@@ -232,8 +232,16 @@ function render() {
   // status. The ready sentence is not news at all — the button already reads Stop and
   // the chip On, so it would be the third time.
   const line = failure || (s.messageKey === 'ready' ? '' : (s.message ?? ''));
+  // …and the fact no state carries: an auto-connect attempt that has not dialled yet is
+  // the app *working*, and the chip says Off for it exactly as it does for an app nobody
+  // asked to connect.  Left unsaid, "waiting for the device" and "this switch does nothing"
+  // are one picture — which is how a working feature reads as a missing one.  It is said
+  // only while it is true: once the attempt dials, the link is up, or the user takes over,
+  // there is nothing left to promise.
+  const waiting = settings.autoConnect === true && settings.waiting === true && !up;
+  const waitingNote = waiting ? (labels.autoConnectWaiting ?? '') : '';
   el.statusLine.className = failure ? 'status bad' : chip.tone ? `status ${chip.tone}` : 'status';
-  text(el.statusLine, line);
+  text(el.statusLine, sentence([line, waitingNote]));
 
   // The measured round trip, on its own line so the sentence never has to wrap around
   // a figure. It means something only while there is a link to have measured.

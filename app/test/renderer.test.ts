@@ -804,6 +804,39 @@ test('a payload with no settings draws the switches off rather than failing', as
   assert.equal(h.el('startup-note').hidden, true);
 });
 
+test('the card says the auto-connect attempt is waiting, and only while it is', async () => {
+  // What the user reported as "the switch does nothing": an armed attempt is the app
+  // *working*, but the chip draws Off for it exactly as it does for an app nobody asked to
+  // connect. The sentence under the link is the only place the two can be told apart.
+  const h = harness();
+  await h.settle();
+  const noDevice = st({ messageKey: 'noDevice', message: t('noDevice') });
+
+  // Armed and unspent: what the switch asked for, said next to what the app found.
+  h.push(noDevice, labels, { autoConnect: true, keepRunning: true, launchAtLogin: false, error: false, waiting: true });
+  assert.equal(h.el('status-line').textContent, `${t('noDevice')} · ${labels.autoConnectWaiting}`);
+
+  // It dialled, or the user took over: the switch is still on, but there is no promise left
+  // to make, so the card goes back to being only about the link.
+  h.push(noDevice, labels, { autoConnect: true, keepRunning: true, launchAtLogin: false, error: false, waiting: false });
+  assert.equal(h.el('status-line').textContent, t('noDevice'));
+
+  // A waiting attempt under a switch that is off is not a state the shell can be in, and
+  // drawing it as one would promise a link nobody asked for: the switch is the first word.
+  h.push(noDevice, labels, { autoConnect: false, keepRunning: true, launchAtLogin: false, error: false, waiting: true });
+  assert.equal(h.el('status-line').textContent, t('noDevice'));
+
+  // And with the link up there is nothing left to wait for, whatever the payload says.
+  h.push(st({ state: 'up', messageKey: 'ready', message: t('ready') }), labels, {
+    autoConnect: true,
+    keepRunning: true,
+    launchAtLogin: false,
+    error: false,
+    waiting: true,
+  });
+  assert.equal(h.el('status-line').textContent, '');
+});
+
 // ── the remedy the app carries out itself ───────────────────────────────────
 
 test('the remedy button is drawn only when the main process offers one, and it is the one offered', async () => {
