@@ -14,6 +14,7 @@
 
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -50,7 +51,7 @@ const BENCH = '[bench] round-trip goodput: 4 x 1024 B in 3.00s -> 103.1 Mbps (0.
  * same way the tunnel suite drives it), so these are patched in `process.env` and put
  * back afterwards — the suite runs its files in order rather than in isolated workers.
  */
-const KNOBS = ['ADB', 'FAKE_ADB_MODE', 'FAKE_ADB_FULL', 'FAKE_ADB_STATE', 'FAKE_ADB_BENCH'] as const;
+const KNOBS = ['ADB', 'FAKE_ADB_MODE', 'FAKE_ADB_FULL', 'FAKE_ADB_STATE', 'FAKE_ADB_BENCH', 'SUNSHINE_CONF'] as const;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -61,6 +62,35 @@ async function waitFor(fn: () => boolean, ms = 8000): Promise<boolean> {
     await sleep(50);
   }
   return false;
+}
+
+/**
+ * Sunshine, as far as the app can tell.
+ *
+ * Every test below ends in a dial, and a dial is only ever taken from an `idle` status:
+ * while nothing answers the streaming service's HTTP port the controller reports
+ * `error`/`noSunshine`, and auto-connect deliberately waits through that — the state is a
+ * fact about the PC rather than about the cable, and it turns into `idle` by itself the
+ * moment the service comes up.  A CI runner has no Sunshine installed, so a test that
+ * wants the dial must answer that one question itself: a listener on a port we own,
+ * named by the conf file the app reads anyway (`SUNSHINE_CONF`, the same knob a user's
+ * own Sunshine config pulls through, and the only way to say "the service is on this
+ * port" without one installed).  Nothing else is faked, because nothing else is asked —
+ * the listener speaks no protocol, it only answers the port probe.
+ *
+ * Returns the way to give the port back; `SUNSHINE_CONF` is restored with the knobs
+ * above, which is why it is one of them.
+ */
+async function fakeSunshine(dir: string): Promise<() => Promise<void>> {
+  const srv = net.createServer((s) => s.end());
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as net.AddressInfo).port;
+  writeFileSync(path.join(dir, 'sunshine.conf'), `port = ${port}\n`);
+  process.env.SUNSHINE_CONF = path.join(dir, 'sunshine.conf');
+  return () =>
+    new Promise<void>((r) => {
+      srv.close(() => r());
+    });
 }
 
 test('an app that starts before the tablet waits, then dials by itself', { skip: posixOnly }, async () => {
@@ -82,6 +112,10 @@ test('an app that starts before the tablet waits, then dials by itself', { skip:
   let atDial: Status | undefined;
   let c: Controller | undefined;
   const raisable = await linkIsRaisableHere();
+  // Measured against the real machine just above, so the strongest assertion below still
+  // only runs where a link can genuinely come up.  Sunshine itself is answered for, so
+  // that the dial — the thing this file is about — happens on every machine.
+  const giveSunshineBack = await fakeSunshine(dir);
   try {
     c = await Controller.create({
       dataDir: dir,
@@ -155,6 +189,7 @@ test('an app that starts before the tablet waits, then dials by itself', { skip:
       assert.ok(up, `the link must come up on its own: ${log.slice(-5).join('\n')}`);
     }
   } finally {
+    await giveSunshineBack();
     await c?.down().catch(() => undefined);
     for (const [k, v] of saved) {
       if (v === undefined) delete process.env[k];
@@ -189,6 +224,9 @@ test('the adb server pushing the device list is what dials, with no tick in sigh
   /** What `index.ts` holds: the one live watch, and the way the attempt talks to it. */
   let speaker: ((live: boolean) => void) | undefined;
   let c: Controller | undefined;
+  // Sunshine answered for, so that the pushed event lands on an `idle` status and the
+  // dial below is a dial and not a `noSunshine` wait — the same reason the first test has it.
+  const giveSunshineBack = await fakeSunshine(dir);
   try {
     c = await Controller.create({
       dataDir: dir,
@@ -254,6 +292,7 @@ test('the adb server pushing the device list is what dials, with no tick in sigh
     // the rest of the session.
     assert.equal(detaches, 1, 'the stream is given back when there is nothing left to wait for');
   } finally {
+    await giveSunshineBack();
     await c?.down().catch(() => undefined);
     for (const [k, v] of saved) {
       if (v === undefined) delete process.env[k];
