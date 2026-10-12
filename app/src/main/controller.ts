@@ -68,7 +68,8 @@ export interface ControllerOpts {
   dataDir?: string;
   plat?: Plat;
   env?: NodeJS.ProcessEnv;
-  /** Directory containing `android/<abi>/udp2tcp`. Defaults to `<app>/resources`. */
+  /** Our own resources: `android/<abi>/udp2tcp`, and the adb copy we ship
+   * (`platform-tools/<plat>/`). Defaults to `<app>/resources`. */
   resourcesDir?: string;
   /** Extra log sink (a file, stdout, an IPC channel). */
   log?: (l: string) => void;
@@ -147,20 +148,7 @@ export class Controller {
       }
     }
 
-    try {
-      this.adb = await Adb.ensure({
-        plat: this.plat,
-        env: this.opts.env ?? process.env,
-        dataDir: this.dataDir,
-        log: (l) => this.pushLog(l),
-      });
-      this.tunnel.setAdb(this.adb);
-    } catch (e) {
-      this.adbError = e instanceof AdbError && e.code === 'conflict' ? 'adbConflict' : 'adbMissing';
-      this.pushLog(`[app] ${(e as Error).message}`);
-      this.last = { state: 'error', message: t(this.adbError), messageKey: this.adbError };
-      return;
-    }
+    if (!(await this.provisionAdb())) return;
 
     // Layer 1 (+ device): the record we wrote, now that we can reach a tablet.
     if (!this.opts.skipReap) {
@@ -174,6 +162,44 @@ export class Controller {
     }
 
     await this.refresh();
+  }
+
+  /**
+   * Find (or fetch) adb and hand it to the tunnel.  Split out of `init()` because it is
+   * the one step that can *change its answer* while the app is open: a first launch at
+   * login can beat the network the download needs, and a machine can have platform-tools
+   * appear next to us later.  `ensureAdb()` is that second look.
+   */
+  private async provisionAdb(): Promise<boolean> {
+    try {
+      this.adb = await Adb.ensure({
+        plat: this.plat,
+        env: this.opts.env ?? process.env,
+        dataDir: this.dataDir,
+        resourcesDir: this.resourcesDir,
+        log: (l) => this.pushLog(l),
+      });
+      this.tunnel.setAdb(this.adb);
+      this.adbError = undefined;
+      return true;
+    } catch (e) {
+      this.adbError = e instanceof AdbError && e.code === 'conflict' ? 'adbConflict' : 'adbMissing';
+      this.pushLog(`[app] ${(e as Error).message}`);
+      this.last = { state: 'error', message: t(this.adbError), messageKey: this.adbError };
+      return false;
+    }
+  }
+
+  /**
+   * Look for adb again.  A no-op when it is already there, which is what makes it safe to
+   * call while waiting for a device; the shell calls it from the auto-connect attempt's
+   * poll, so a machine whose first look found no adb is not left needing a manual button
+   * press to recover — the same rule the rest of this app follows: it does the thing, it
+   * does not ask the user to.
+   */
+  async ensureAdb(): Promise<boolean> {
+    if (this.adb && !this.adbError) return true;
+    return this.provisionAdb();
   }
 
   // ---------------------------------------------------------------- status

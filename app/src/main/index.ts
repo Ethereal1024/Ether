@@ -45,10 +45,10 @@ import { createTray, type TrayHandle } from './tray.js';
 import type { TrayAction } from './traymenu.js';
 import { traySupport, type TrayFix } from './traysupport.js';
 import {
+  AutoConnectAttempt,
   installStartup,
   readSettings,
   removeStartup,
-  shouldAutoConnect,
   startupDir,
   startupEntry,
   startupInstalled,
@@ -77,12 +77,22 @@ let settingsError = false;
 /** Whether the OS currently has us in the session's own login items. */
 let loginItemOn = false;
 /**
- * The auto-connect attempt: at most one per launch.  Armed when the controller is
- * ready and given up for good as soon as the user presses a button themselves or the
- * link moves past idle — never re-armed while the app is open, so the switch means
- * "when you open Ether", not "whenever a cable appears".
+ * The auto-connect attempt: at most one per launch.  Built when the controller is ready
+ * and over for good as soon as the user presses a button themselves or the link moves
+ * past idle — never re-armed while the app is open, so the switch means "when you open
+ * Ether", not "whenever a cable appears".
+ *
+ * While it is waiting it polls the bus (see `AutoConnectAttempt`), because the launch
+ * this switch is about is the one where nothing is plugged in yet: without a poll no
+ * status is ever pushed again, and the attempt would sit armed forever behind a card
+ * that still says "No USB device".
  */
-let autoConnectPending = false;
+let autoConnect: AutoConnectAttempt | undefined;
+
+/** The user took over, or the app is going down: no attempt of ours may follow it. */
+function disarmAutoConnect(): void {
+  autoConnect?.disarm();
+}
 
 // ── the tray, and the remedies the window can offer ─────────────────────────
 
@@ -339,7 +349,7 @@ function showWindow(): void {
 function onTrayAction(a: TrayAction): void {
   if (a === 'show') return showWindow();
   if (a === 'quit') return app.quit();
-  autoConnectPending = false;
+  disarmAutoConnect();
   lastFix = undefined;
   const c = controller;
   if (!c) return;
@@ -526,7 +536,7 @@ function push(s: Status): void {
   // The icon is the window's second door, and the tooltip's one word is read from the
   // same status the card draws.
   tray?.update(s.state);
-  autoConnectStep(s);
+  autoConnect?.step(s);
   noteSerial(s);
 }
 
@@ -600,20 +610,28 @@ async function setLoginItem(on: boolean): Promise<void> {
 }
 
 /**
- * The one auto-connect attempt: made when the app already knows there is a usable
- * device, and dropped as soon as the status says anything else.  A launch with no cable
- * therefore stays *armed* — plugging the device in is the thing the switch was for —
- * while a link that came up, or a state that needs the user, ends the attempt.
+ * Build the one attempt for this launch.  Called once the controller is ready, because
+ * the two things it needs from the shell — the status push and `up()` — only exist then.
  */
-function autoConnectStep(s: Status): void {
-  if (!autoConnectPending) return;
-  if (shouldAutoConnect(settings, s)) {
-    autoConnectPending = false;
-    process.stdout.write('[app] auto-connect: the device is ready, starting the wired link\n');
-    void controller?.up().catch((e) => process.stdout.write(`[app] auto-connect failed: ${(e as Error).message}\n`));
-    return;
-  }
-  if (s.state !== 'idle') autoConnectPending = false;
+function buildAutoConnectAttempt(): AutoConnectAttempt {
+  return new AutoConnectAttempt({
+    settings: () => settings,
+    refresh: async () => {
+      await controller?.refresh();
+    },
+    dial: async () => {
+      await controller?.up();
+    },
+    // adb itself may have been missing at the first look: a first run that raced the
+    // network, or a machine where platform-tools was never installed next to ours.  The
+    // controller looks for it again (the bundled copy first, the download as the last
+    // resort), so the attempt is not lost to a download that failed before the network
+    // was up — which is exactly what an app started at login tends to hit.
+    provision: async () => {
+      await controller?.ensureAdb();
+    },
+    log: (l) => process.stdout.write(`${l}\n`),
+  });
 }
 
 /**
@@ -659,21 +677,26 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('start', async () => {
-    autoConnectPending = false; // the user took over: no attempt of ours may follow it
+    disarmAutoConnect(); // the user took over: no attempt of ours may follow it
     lastFix = undefined;
     const c = await requireController();
+    // The button is the second chance for adb itself.  A first launch at login can beat
+    // the network the download needs, and the app ships adb of its own — so pressing
+    // Connect looks for it again instead of answering "install platform-tools" and
+    // stopping there.  A no-op whenever adb is already there.
+    await c.ensureAdb().catch(() => undefined);
     return payload(await c.up());
   });
 
   ipcMain.handle('stop', async () => {
-    autoConnectPending = false;
+    disarmAutoConnect();
     lastFix = undefined;
     const c = await requireController();
     return payload(await c.down());
   });
 
   ipcMain.handle('restart-adb', async () => {
-    autoConnectPending = false;
+    disarmAutoConnect();
     lastFix = undefined;
     const c = await requireController();
     return payload(await c.restartAdb());
@@ -691,7 +714,7 @@ function registerIpc(): void {
    * with the outcome in `fixResult` — a refusal is drawn as a sentence, not thrown.
    */
   ipcMain.handle('fix', async () => {
-    autoConnectPending = false;
+    disarmAutoConnect();
     const pressed = await runFix();
     if (pressed) lastFix = pressed;
     return payload(lastStatus ?? controller?.status() ?? startingStatus());
@@ -712,7 +735,7 @@ function registerIpc(): void {
         await writeSettings(DATA_DIR, settings);
         // Turning it off also cancels an attempt that has not happened yet.  Turning it
         // on does not dial now: the switch is about the *next* launch.
-        if (!settings.autoConnect) autoConnectPending = false;
+        if (!settings.autoConnect) disarmAutoConnect();
       } else if (o.key === 'keepRunning') {
         // Turning it off is a promise about what the *next* close does; the window that
         // is open right now stays open, because nothing was closed to ask for it.
@@ -744,6 +767,7 @@ function requireController(): Promise<Controller> {
 
 /** Closing the window must not leave a relay, a reverse or a tablet process behind. */
 async function teardown(): Promise<void> {
+  disarmAutoConnect(); // an app on its way out has nothing left to wait for
   if (!controller) return;
   try {
     await Promise.race([controller.down(), sleep(5000)]);
@@ -801,16 +825,24 @@ if (!gotLock) {
     });
     controller = await controllerReady;
 
-    // Armed only now: the statuses pushed while the controller was being built say
-    // "checking", and acting on one of those would disarm the attempt before it could
-    // be made.  The push at the end of this block is what makes the attempt.
-    autoConnectPending = settings.autoConnect;
+    // Built only now: the statuses pushed while the controller was being built say
+    // "checking", and the attempt has nothing to act on before the controller can dial
+    // anyway.  The push at the end of this block is what starts it — and a `checking`
+    // status that lands after this line is no longer fatal to it, which is what the
+    // second half of this fix is: `checking` means "wait", not "give up".
+    autoConnect = buildAutoConnectAttempt();
+    autoConnect.arm();
 
     // The page is a local file loaded asynchronously, so it may already have
     // finished by the time adb answered: the push is what draws the first status,
     // and `did-finish-load` alone would silently never fire.
     const w = win;
-    if (!w) return;
+    if (!w) {
+      // A launch that has no window left to draw into still owes the attempt its first
+      // status, or the poll that would notice the cable never starts.
+      autoConnect.step(controller.status());
+      return;
+    }
     if (w.webContents.isLoading()) w.webContents.once('did-finish-load', () => push(controller!.status()));
     else push(controller.status());
 

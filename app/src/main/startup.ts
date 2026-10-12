@@ -188,6 +188,154 @@ export function shouldAutoConnect(settings: Settings, status: AutoConnectStatus)
   return settings.autoConnect === true && status.state === 'idle' && status.device?.state === 'device';
 }
 
+/**
+ * What an *armed* attempt does with a status that did not dial.
+ *
+ * `wait` is the one that matters, and it is the fix for the launch this switch is
+ * actually about.  At login the app is usually the first thing up: the cable is still
+ * in the drawer, the tablet is still booting, or the device has been seen but not
+ * authorized yet.  None of those is an answer — they are the reasons the switch exists —
+ * so the attempt stays armed and keeps asking the bus (see `AutoConnectAttempt`).
+ *
+ * Only a link that is already running, or on its way up, ends it: that link *is* the
+ * answer, and a second dial could not be what the user meant.  An `error` status does not
+ * end it either: the errors this app reports are about the same boot order (no streaming
+ * service yet, a device not allowed yet), and every one of them can turn into a usable
+ * device while the app is sitting there.
+ */
+export type AutoConnectDecision = 'dial' | 'wait' | 'give-up';
+
+/** The three states in which the link is someone's already (tunnel.ts's TunnelState). */
+const LINK_STATES = new Set(['starting', 'up', 'degraded']);
+
+export function autoConnectDecision(settings: Settings, status: AutoConnectStatus): AutoConnectDecision {
+  if (shouldAutoConnect(settings, status)) return 'dial';
+  if (settings.autoConnect !== true) return 'give-up';
+  return LINK_STATES.has(status.state ?? '') ? 'give-up' : 'wait';
+}
+
+/** Everything the attempt needs from the shell that owns it. */
+export interface AutoConnectDeps {
+  /** The switches *now*: the user can turn the attempt off while it waits. */
+  settings: () => Settings;
+  /** Ask the machine again.  The shell maps this to `controller.refresh()`; the status
+   * push that ends it is what runs the one decision in `step()`. */
+  refresh: () => Promise<void>;
+  /** Raise the link.  Called at most once per launch. */
+  dial: () => Promise<void>;
+  /** Make sure adb itself is there, called again while waiting when the first look
+   * found none (a first run that raced the network, a machine where adb was never
+   * installed).  Optional, and expected to be free when adb is already found. */
+  provision?: () => Promise<void>;
+  log: (l: string) => void;
+  /** How often the bus is asked again while waiting. */
+  intervalMs?: number;
+  /** How often a missing adb may be looked for again, so a failed download is not
+   * retried every tick. */
+  provisionEveryMs?: number;
+}
+
+/**
+ * One launch's auto-connect attempt, from arming to the dial.
+ *
+ * It exists because "connect on launch" is not a decision about one status, it is a
+ * small state machine that has to survive the launch order: armed when the switches have
+ * been read, alive while the answer is "not yet", and over the moment it dialled, found a
+ * link already running, or the user took over.  The three earlier bugs all lived in that
+ * shape — an attempt that its own `checking` push disarmed, an attempt that no later
+ * status ever woke (nothing polls the bus when the app is idle), and an attempt that gave
+ * up on the first refusal from a device that was merely still booting.
+ *
+ * It is Electron-free on purpose: the timer, the retry and the decision are all testable
+ * without a window, and the shell is left with the two calls only it can make.
+ */
+export class AutoConnectAttempt {
+  private armed = false;
+  private timer?: NodeJS.Timeout;
+  private busy = false;
+  private lastProvision = 0;
+  private readonly interval: number;
+  private readonly provisionEvery: number;
+
+  constructor(private readonly deps: AutoConnectDeps) {
+    this.interval = deps.intervalMs ?? 2000;
+    this.provisionEvery = deps.provisionEveryMs ?? 30_000;
+  }
+
+  /** The switch was on when this launch read it. */
+  arm(): void {
+    this.armed = this.deps.settings().autoConnect === true;
+    // The first look at the bus was the controller's own `refresh()`; a retry of a
+    // *missing* adb is what this stamp spaces out.
+    this.lastProvision = Date.now();
+  }
+
+  /** Over: it dialled, the link was already there, or the user took over (the button,
+   * the switch, the tray, a quit). */
+  disarm(): void {
+    this.armed = false;
+    this.stop();
+  }
+
+  /** Whether an attempt is still waiting — what the tests assert on. */
+  get pending(): boolean {
+    return this.armed;
+  }
+
+  /** One status: dial, keep waiting, or end the attempt. */
+  step(s: AutoConnectStatus): void {
+    if (!this.armed) return;
+    const decision = autoConnectDecision(this.deps.settings(), s);
+    if (decision === 'wait') {
+      this.start();
+      return;
+    }
+    this.disarm();
+    if (decision === 'give-up') return;
+    this.deps.log('[app] auto-connect: the device is ready, starting the wired link');
+    void this.deps.dial().catch((e) => this.deps.log(`[app] auto-connect failed: ${(e as Error).message}`));
+  }
+
+  private start(): void {
+    if (this.timer) return;
+    // `unref` because a timer must never be the reason a quitting app stays alive.
+    const timer = setInterval(() => void this.poll(), this.interval);
+    timer.unref?.();
+    this.timer = timer;
+  }
+
+  private stop(): void {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  /**
+   * Ask the machine again, then get out of the way: the decision is not taken here.  The
+   * `refresh()` ends in a status push, and that push runs the one `step()` above — so the
+   * timer cannot dial a link the button would not, and "ready" keeps exactly one
+   * definition.  Overlapping ticks are dropped rather than queued: a slow adb must not
+   * build a backlog of them.
+   */
+  private async poll(): Promise<void> {
+    if (!this.armed) return this.stop();
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      const now = Date.now();
+      if (this.deps.provision && now - this.lastProvision >= this.provisionEvery) {
+        this.lastProvision = now; // stamped before the await: a slow fetch must not stack
+        await this.deps.provision();
+      }
+      await this.deps.refresh();
+    } catch (e) {
+      this.deps.log(`[app] auto-connect poll failed: ${(e as Error).message}`);
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+
 // ── the other decision the shell asks for: what closing the window means ────
 
 /** What the shell does with the close button. */

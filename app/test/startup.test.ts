@@ -15,8 +15,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
+  AutoConnectAttempt,
   DEFAULT_SETTINGS,
   SETTINGS_NAME,
+  autoConnectDecision,
   installStartup,
   normalizeSettings,
   quoteExecArg,
@@ -37,6 +39,10 @@ import {
 function tmpDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'ether-startup-'));
 }
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const ON: Settings = { autoConnect: true, keepRunning: true };
+const OFF: Settings = { autoConnect: false, keepRunning: true };
 
 // ── the settings file ───────────────────────────────────────────────────────
 
@@ -224,6 +230,232 @@ test('auto-connect dials once, and only into an idle link with a usable device',
   }
   assert.equal(shouldAutoConnect(on, { state: 'idle' }), false);
   assert.equal(shouldAutoConnect(on, {}), false);
+});
+
+test('the armed attempt waits through the launch order and gives up only on a link that is already there', () => {
+  const idle: AutoConnectStatus = { state: 'idle', device: { state: 'device' } };
+
+  // The one that dials.
+  assert.equal(autoConnectDecision(ON, idle), 'dial');
+
+  // Nothing found yet is not an answer.  At login the bus is often empty for a while —
+  // the tablet is still booting, the cable is still in the drawer, the device has been
+  // seen but not authorized.  All of those are what the switch is for, so the attempt
+  // stays armed and keeps looking rather than deciding "no" once and for all.
+  for (const s of [
+    { state: 'checking' },
+    {},
+    { state: 'idle' },
+    { state: 'idle', device: { state: 'unauthorized' } },
+    { state: 'idle', device: { state: 'offline' } },
+    // An error is the same boot order wearing a worse word (no streaming service yet, a
+    // device the user has not allowed yet).  Every one of them can turn into a device.
+    { state: 'error' },
+    { state: 'error', device: { state: 'device' } },
+  ] as AutoConnectStatus[]) {
+    assert.equal(autoConnectDecision(ON, s), 'wait', JSON.stringify(s));
+  }
+
+  // A link that is running, or on its way up, *is* the answer: a second dial could not
+  // be what the user meant.
+  for (const state of ['starting', 'up', 'degraded']) {
+    assert.equal(autoConnectDecision(ON, { ...idle, state }), 'give-up', state);
+  }
+
+  // And the switch itself overrides everything: off is off, waiting included.
+  assert.equal(autoConnectDecision(OFF, { state: 'idle' }), 'give-up');
+  assert.equal(autoConnectDecision(OFF, idle), 'give-up');
+  assert.equal(autoConnectDecision(OFF, { state: 'up' }), 'give-up');
+});
+
+test('an armed attempt survives a launch with no device and dials the moment one appears', async () => {
+  // The bug this file exists for, as one test: the app is up before the tablet, so the
+  // statuses it sees are "nothing yet" — and the link still comes up on its own, with no
+  // press, as soon as the bus answers.
+  const log: string[] = [];
+  let dials = 0;
+  let refreshes = 0;
+  const attempt = new AutoConnectAttempt({
+    settings: () => ON,
+    refresh: async () => {
+      refreshes += 1;
+    },
+    dial: async () => {
+      dials += 1;
+    },
+    log: (l) => log.push(l),
+    intervalMs: 2,
+    provisionEveryMs: 60_000, // this test is about the statuses, not the adb retry
+  });
+
+  attempt.arm();
+  assert.equal(attempt.pending, true, 'the switch was on, so the attempt is armed');
+
+  // The launch order, worst case first: the app is up, the machine has not been asked
+  // anything useful yet.
+  attempt.step({ state: 'checking' });
+  assert.equal(attempt.pending, true, 'a `checking` push must not end the attempt');
+  attempt.step({ state: 'idle' });
+  assert.equal(attempt.pending, true, 'no device is not an answer');
+
+  // Waiting means asking again: nothing else would ever wake an idle app.
+  await sleep(30);
+  assert.ok(refreshes > 1, `the bus must be polled while waiting, saw ${refreshes}`);
+  assert.equal(dials, 0, 'nothing to dial at yet');
+
+  // An unauthorized device is the same "not yet" — the user has not tapped Allow.
+  attempt.step({ state: 'idle', device: { state: 'unauthorized' } });
+  assert.equal(attempt.pending, true);
+
+  // Now the tablet is booted and allowed.  One status is all it takes.
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  assert.equal(attempt.pending, false, 'dialling ends the attempt');
+  assert.equal(dials, 1, 'exactly once');
+  assert.deepEqual(log, ['[app] auto-connect: the device is ready, starting the wired link']);
+
+  // And the polling really stopped: `unref`'d or not, a timer that outlived its attempt
+  // would spend the rest of the session asking the bus about a link that is up.
+  const settled = refreshes;
+  await sleep(30);
+  assert.equal(refreshes, settled, 'the poll must stop once it dialled');
+  assert.equal(dials, 1, 'and it must not dial again');
+});
+
+test('a missing adb is looked for again while waiting, but not on every tick', async () => {
+  // A first run at login can race the network: the download of platform-tools fails, adb
+  // is never found, and the device that is connected would sit there forever.  The retry
+  // has to exist — and it has to be spaced out, because each one can mean a download.
+  let provisions = 0;
+  let refreshes = 0;
+  const attempt = new AutoConnectAttempt({
+    settings: () => ON,
+    refresh: async () => {
+      refreshes += 1;
+    },
+    dial: async () => undefined,
+    provision: async () => {
+      provisions += 1;
+    },
+    log: () => undefined,
+    intervalMs: 10,
+    provisionEveryMs: 50,
+  });
+
+  attempt.arm();
+  attempt.step({ state: 'idle' }); // no device, so the attempt waits
+  await sleep(300);
+  attempt.disarm();
+
+  assert.ok(refreshes > 5, `the tick must keep asking, saw ${refreshes}`);
+  assert.ok(provisions >= 1, 'a link with no adb must look for one again');
+  assert.ok(provisions < refreshes, `retries are spaced out, not one per tick (${provisions} of ${refreshes})`);
+});
+
+test('a slower adb must not stack polls, and a failed one must not end the attempt', async () => {
+  let refreshes = 0;
+  let inFlight = 0;
+  let mostAtOnce = 0;
+  const attempt = new AutoConnectAttempt({
+    settings: () => ON,
+    refresh: async () => {
+      refreshes += 1;
+      inFlight += 1;
+      mostAtOnce = Math.max(mostAtOnce, inFlight);
+      await sleep(50); // far longer than the tick
+      inFlight -= 1;
+      throw new Error('adb: device not found');
+    },
+    dial: async () => {
+      throw new Error('must not dial');
+    },
+    log: () => undefined,
+    intervalMs: 5,
+    provisionEveryMs: 60_000,
+  });
+
+  attempt.arm();
+  attempt.step({ state: 'idle' });
+  await sleep(160);
+  attempt.disarm();
+
+  assert.ok(refreshes >= 2, `a slow refresh must still be retried, saw ${refreshes}`);
+  assert.ok(refreshes < 30, `overlapping ticks must be dropped, saw ${refreshes} in 160ms at 5ms`);
+  assert.equal(mostAtOnce, 1, 'ticks never overlap');
+});
+
+test('the user taking over — the button, the switch, a quit — ends the attempt before it dials', async () => {
+  // Half of the safety of this machine is in what it *stops* doing: an attempt that
+  // survived the user pressing Stop would dial a link they just refused.
+  let dials = 0;
+  const attempt = new AutoConnectAttempt({
+    settings: () => ({ autoConnect: true, keepRunning: true }),
+    refresh: async () => undefined,
+    dial: async () => {
+      dials += 1;
+    },
+    log: () => undefined,
+    intervalMs: 2,
+    provisionEveryMs: 60_000,
+  });
+
+  attempt.arm();
+  attempt.step({ state: 'idle' });
+  await sleep(20);
+  attempt.disarm();
+  assert.equal(attempt.pending, false);
+
+  // The cable arrives after the user gave up waiting: nothing dials.
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  await sleep(20);
+  assert.equal(dials, 0, 'a disarmed attempt must not dial');
+});
+
+test('turning the switch off while the attempt waits disarms it on the next status', async () => {
+  let settings: Settings = ON;
+  let dials = 0;
+  let log: string[] = [];
+  const attempt = new AutoConnectAttempt({
+    settings: () => settings,
+    refresh: async () => undefined,
+    dial: async () => {
+      dials += 1;
+    },
+    log: (l) => log.push(l),
+    intervalMs: 2,
+    provisionEveryMs: 60_000,
+  });
+
+  attempt.arm();
+  attempt.step({ state: 'idle' });
+  assert.equal(attempt.pending, true);
+
+  // The switch is read at every step, not remembered from arming: the user's latest word
+  // wins, even mid-wait.
+  settings = OFF;
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  assert.equal(attempt.pending, false);
+  assert.deepEqual(log, [], 'no ready line for a link the user just turned off');
+
+  await sleep(20);
+  assert.equal(dials, 0);
+});
+
+test('the switch off at launch arms nothing at all', () => {
+  let dials = 0;
+  const attempt = new AutoConnectAttempt({
+    settings: () => OFF,
+    refresh: async () => undefined,
+    dial: async () => {
+      dials += 1;
+    },
+    log: () => undefined,
+  });
+
+  attempt.arm();
+  assert.equal(attempt.pending, false, 'nothing was asked for, so nothing is waiting');
+
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  assert.equal(dials, 0);
 });
 
 // ── what closing the window means ───────────────────────────────────────────

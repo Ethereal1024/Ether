@@ -48,7 +48,12 @@ const MESSAGES: Record<MsgKey, string> = {
   noMoonlight: 'No streaming client is installed on the device',
   noSunshine: 'The streaming service on this PC is not running',
   udpFail: 'UDP channel verification failed',
-  adbMissing: 'adb not found: install platform-tools or set the ADB environment variable, then retry',
+  // The app carries its own adb, so this is the state where *every* door failed: the
+  // copy shipped with the app, an adb already on this machine, and the built-in download
+  // (offline, or a stripped build).  It must not send the user off to install
+  // platform-tools — that is the manual step this app exists to remove — so it names
+  // what failed and leaves the retry to the app's own polling and the Connect button.
+  adbMissing: 'adb could not be started: neither the copy shipped with the app nor one on this machine works, and the download failed',
   adbConflict: 'A different adb server version is running; it must be restarted (other sessions will drop)',
   abiUnsupported: 'Device ABI {abi} is not supported',
   elfNoExec: 'The device-side program cannot run (maybe /data/local/tmp is mounted noexec)',

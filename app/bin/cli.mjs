@@ -32,6 +32,7 @@ Usage:
   node bin/cli.mjs --bench [--seconds N] [--window N] [--json]
   node bin/cli.mjs --selftest                      unit + loopback interop (no device)
   node bin/cli.mjs --reap [--json]                 clear leftovers (reverses / orphans / pid files)
+  node bin/cli.mjs --fetch-adb [--plat P] [--force]  put our own adb copy in resources/ (packaging step)
   node bin/cli.mjs --serve                         internal: resident service (--up starts it; do not run by hand)
 
 Options:
@@ -41,6 +42,8 @@ Options:
   --timeout SEC     wall-clock limit for --up (default 25)
   --fast            --up skips the device self-check and the post-up verification
   --keep            --bench leaves the channel up afterwards
+  --plat P          --fetch-adb: linux | darwin | win32 | all (default: this platform)
+  --force           --fetch-adb: fetch again even when the copy is already there
   --help
 `;
 
@@ -52,9 +55,11 @@ function die(msg, code = 2) {
 const argv = process.argv.slice(2);
 const opt = {
   state: false, up: false, down: false, bench: false, selftest: false, reap: false, serve: false,
+  fetchAdb: false,
   json: false, dataDir: undefined, elf: undefined,
   timeout: 25, seconds: 10, window: 1024, frame: 1200,
   fast: false, keep: false, logs: 0, help: false,
+  plat: undefined, force: false,
 };
 
 for (let i = 0; i < argv.length; i++) {
@@ -71,6 +76,9 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--selftest') opt.selftest = true;
   else if (a === '--reap') opt.reap = true;
   else if (a === '--serve') opt.serve = true;
+  else if (a === '--fetch-adb') opt.fetchAdb = true;
+  else if (a === '--force') opt.force = true;
+  else if (a === '--plat') opt.plat = next();
   else if (a === '--json') opt.json = true;
   else if (a === '--fast') opt.fast = true;
   else if (a === '--keep') opt.keep = true;
@@ -407,6 +415,45 @@ async function cmdDown(mods) {
 }
 
 /**
+ * `--fetch-adb`: put a copy of adb *next to the app* instead of in the user's data dir.
+ *
+ * This is the packaging step, not a run-time path: a built package carries the one
+ * dependency it cannot work without, so the machine is never asked to install anything
+ * and the first launch after a login — where the network is usually not up yet — needs no
+ * download.  It downloads platform-tools from Google and keeps only `adb` (plus the DLLs
+ * the Windows build loads), which is also why the tree it writes into is not committed:
+ * the fetch is one command, and `npm run dist` runs it.
+ */
+async function cmdFetchAdb(mods) {
+  const { Adb } = mods.adbMod;
+  const { currentPlat, bundledAdbDir } = mods.platformMod;
+  const dir = process.env.ETHER_RESOURCES ?? path.join(appRoot, 'resources');
+
+  const want = opt.plat ?? currentPlat();
+  const plats = want === 'all' ? ['linux', 'darwin', 'win32'] : [want];
+  for (const p of plats) {
+    if (!['linux', 'darwin', 'win32'].includes(p)) die(`--plat must be linux, darwin, win32 or all, not ${p}`);
+  }
+
+  const done = [];
+  for (const plat of plats) {
+    const into = bundledAdbDir(dir, plat);
+    process.stderr.write(`[adb] fetching platform-tools for ${plat} into ${into}\n`);
+    const exe = await Adb.fetchInto({
+      plat,
+      dir: into,
+      log: (l) => process.stderr.write(`${l}\n`),
+      force: opt.force,
+    });
+    done.push({ plat, exe });
+  }
+
+  if (opt.json) process.stdout.write(`${JSON.stringify(done, null, 2)}\n`);
+  else for (const d of done) process.stdout.write(`${d.plat.padEnd(6)}: ${d.exe}\n`);
+  return 0;
+}
+
+/**
  * `--serve`: the resident half of `--up`. Runs the tunnel in this process, keeps
  * status.json beating, and restores everything on SIGTERM/SIGINT.
  */
@@ -662,6 +709,7 @@ async function main() {
   serviceInit(mods);
 
   if (opt.serve) return cmdServe(mods);
+  if (opt.fetchAdb) return cmdFetchAdb(mods);
   if (opt.down) return cmdDown(mods);
   if (opt.reap) return cmdReap(mods);
   if (opt.selftest) return cmdSelftest(mods);

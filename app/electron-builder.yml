@@ -5,7 +5,14 @@
 #      is not compiled by tsc, so nothing else would carry it into the asar — and
 #      without it the window has no IPC surface at all.
 #   2. `extraResources` copies `resources/` to the *root* of process.resourcesPath,
-#      which is exactly where `index.ts` looks for the tablet ELF when packaged.
+#      which is exactly where `index.ts` looks for the tablet ELF when packaged —
+#      and, under `resources/platform-tools/<plat>/`, for adb itself: the package
+#      carries the one dependency it cannot work without, so no machine is ever
+#      asked to install platform-tools.  `platform.ts` looks there *after* the
+#      user's own adb (`$ADB`, `$PATH`, the SDK dirs), so a developer's copy still
+#      wins, and before the run-time download, which is then only a repair path.
+#      The copy is fetched by `npm run dist*` (`bin/cli.mjs --fetch-adb`) and is
+#      never committed: see `.gitignore` and `resources/NOTICE`.
 #
 # Package identity: the `deb` target (fpm) refuses to build without a Homepage URL
 # and a maintainer, and package.json now carries both.  The homepage/repository/
@@ -16,7 +23,7 @@
 # project, and a real-looking address would just swallow bug reports.
 appId: dev.ether.app
 productName: Ether
-copyright: MIT-licensed; ships no Google code (platform-tools is downloaded at runtime)
+copyright: MIT-licensed; bundles adb from Google's platform-tools (fetched at package time, see resources/NOTICE)
 
 directories:
   output: release
@@ -34,6 +41,10 @@ files:
   - src/main/preload.cjs
   - src/renderer/**
 
+# The tablet ELF, the icons, the NOTICE — and our own adb, which `npm run dist*`
+# fetched into `resources/platform-tools/<this platform>/` a moment before this runs.
+# The whole directory is copied rather than a file list, so a package built on the
+# target platform carries exactly the one copy it can run.
 extraResources:
   - from: resources
     to: .

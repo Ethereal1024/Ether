@@ -45,8 +45,16 @@ function uniq(xs: string[]): string[] {
  *   4. ~/Library/Android/sdk/platform-tools
  *   5. %LOCALAPPDATA%\Android\Sdk\platform-tools
  *   6. /usr/lib/android-sdk/platform-tools
+ *   7. our own copy, shipped with the app (`<resources>/platform-tools/<plat>/`)
+ *
+ * What the user already has is still asked first: a machine with a working setup keeps
+ * its own adb server and version, and two clients of one server is the state the app
+ * wants to stay in.  Step 7 is what the app owes *itself* — it is why a machine with no
+ * Android SDK never has to be told to install anything, and why the first launch after a
+ * login needs no network.  The download (step 8, in `Adb.ensure`) is the last resort it
+ * always was.
  */
-export function adbCandidates(env: NodeJS.ProcessEnv, plat: Plat): string[] {
+export function adbCandidates(env: NodeJS.ProcessEnv, plat: Plat, resourcesDir?: string): string[] {
   const exe = adbExeName(plat);
   const out: string[] = [];
 
@@ -71,12 +79,31 @@ export function adbCandidates(env: NodeJS.ProcessEnv, plat: Plat): string[] {
 
   out.push(path.join('/usr', 'lib', 'android-sdk', 'platform-tools', exe));
 
+  if (resourcesDir) out.push(bundledAdbPath(resourcesDir, plat));
+
   return uniq(out);
 }
 
+/**
+ * Where our own copy of platform-tools lives: one directory per platform, so a package
+ * carries only the adb it can run, and the path is the same in a source tree
+ * (`app/resources/…`) and in a package (electron-builder copies `resources/` there).
+ */
+export function bundledAdbDir(resourcesDir: string, plat: Plat): string {
+  return path.join(resourcesDir, 'platform-tools', plat);
+}
+
+export function bundledAdbPath(resourcesDir: string, plat: Plat): string {
+  return path.join(bundledAdbDir(resourcesDir, plat), adbExeName(plat));
+}
+
 /** First candidate that exists and is executable; undefined => caller must download. */
-export function findAdb(env: NodeJS.ProcessEnv, plat: Plat): string | undefined {
-  for (const c of adbCandidates(env, plat)) {
+export function findAdb(
+  env: NodeJS.ProcessEnv,
+  plat: Plat,
+  resourcesDir?: string,
+): string | undefined {
+  for (const c of adbCandidates(env, plat, resourcesDir)) {
     try {
       const st = statSync(c);
       if (!st.isFile()) continue;

@@ -1,18 +1,23 @@
 // adb.ts — find adb, or fetch our own copy; then parse what it says.
 //
 // Rules that shape this file (§3.2):
-//   * always prefer what the user already has — never install anything system-wide,
-//     never touch PATH, never sudo;
-//   * the download goes into the app's own data dir and is used only by our child
-//     processes, so deleting the app dir leaves the machine exactly as it was;
+//   * the app ships its own copy of platform-tools (`resources/platform-tools/<plat>/`,
+//     placed there by `bin/cli.mjs --fetch-adb` while packaging) and hands it to every
+//     child process — so no machine has to be told to install anything, and the first
+//     launch after a login needs no network;
+//   * whatever the user already has still wins over it: that keeps the user's own adb
+//     server and version in charge when there is one;
+//   * failing both, the download goes into the app's own data dir and is used only by our
+//     child processes, so deleting the app dir leaves the machine exactly as it was.
+//     Nothing is ever installed system-wide, PATH is never touched, never sudo;
 //   * never `kill-server` on our own initiative — a running adb server may belong
 //     to someone else's debugging session.
 
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, readFile, rename, stat } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { downloadToFile } from './download.js';
-import { adbExeName, findAdb, type Plat } from './platform.js';
+import { adbExeName, bundledAdbPath, currentPlat, findAdb, type Plat } from './platform.js';
 import { extractZip } from './zip.js';
 
 export type DevState = 'device' | 'unauthorized' | 'offline' | 'no permissions' | 'unknown';
@@ -28,6 +33,9 @@ export interface AdbOpts {
   env: NodeJS.ProcessEnv;
   dataDir: string;
   log: (l: string) => void;
+  /** Where our own `platform-tools/<plat>/adb` lives.  Omitted by the headless tests
+   * that only care about the user's own copies. */
+  resourcesDir?: string;
   /** Restrict every command to one device. */
   serial?: string;
 }
@@ -119,11 +127,11 @@ export class Adb {
     this.version = version;
   }
 
-  /** Four-step discovery; step four downloads platform-tools into `dataDir`. */
+  /** Five-step discovery; the last step downloads platform-tools into `dataDir`. */
   static async ensure(o: AdbOpts): Promise<Adb> {
-    const found = findAdb(o.env, o.plat);
+    const found = findAdb(o.env, o.plat, o.resourcesDir) ?? (await Adb.bundled(o));
     if (found) {
-      const version = await Adb.readVersion(found, o).catch(() => 'unknown');
+      const version = await Adb.readVersion(found).catch(() => 'unknown');
       o.log(`[adb] using ${found} (version ${version})`);
       return new Adb(o, found, version);
     }
@@ -134,7 +142,96 @@ export class Adb {
     return new Adb(o, exe, version);
   }
 
-  private static readVersion(exe: string, o: AdbOpts): Promise<string> {
+  /**
+   * Our own copy, with the executable bit put back when packaging dropped it.  This is a
+   * file we own in our own resources — repairing its mode is not "installing" anything —
+   * and it is the difference between adb working and the user being told to go and
+   * install platform-tools themselves.
+   */
+  private static async bundled(o: AdbOpts): Promise<string | undefined> {
+    if (!o.resourcesDir) return undefined;
+    const p = bundledAdbPath(o.resourcesDir, o.plat);
+    try {
+      const st = await stat(p);
+      if (!st.isFile()) return undefined;
+      if (o.plat !== 'win32' && (st.mode & 0o111) === 0) await chmod(p, 0o755);
+      return p;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Put a copy of adb *next to the app* rather than in the user's data dir.  This is the
+   * packaging step's half (`bin/cli.mjs --fetch-adb`), never a run-time path: a built
+   * package ships the one dependency it cannot work without, so a machine with no Android
+   * SDK is never asked to install anything, and the first launch after a login — where the
+   * network is usually not up yet — needs no download at all.
+   *
+   * It copies `adb` plus the DLLs the Windows build loads (AdbWinApi, AdbWinUsbApi,
+   * libwinpthread — whatever the archive carries at its top level), and Google's own
+   * `NOTICE.txt` next to them so the attribution travels with the binary.  fastboot,
+   * sqlite3 and the rest of platform-tools are not copied: this app never runs them, and
+   * carrying them would multiply the size of every package for nothing.
+   */
+  static async fetchInto(o: { plat: Plat; dir: string; log: (l: string) => void; force?: boolean }): Promise<string> {
+    const exe = adbExeName(o.plat);
+    const target = path.join(o.dir, exe);
+    if (!o.force) {
+      const there = await stat(target).catch(() => undefined);
+      if (there?.isFile() && there.size > 0) {
+        o.log(`[adb] ${target} is already there (${there.size >> 20} MiB); nothing to fetch`);
+        return target;
+      }
+    }
+
+    await mkdir(o.dir, { recursive: true });
+    const zipPath = path.join(o.dir, `platform-tools-latest-${o.plat}.zip`);
+    try {
+      await downloadToFile(platformToolsUrl(o.plat), zipPath, (l) => o.log(`[adb] ${l}`), 'platform-tools');
+    } catch (e) {
+      throw new AdbError(`platform-tools download failed: ${(e as Error).message}`, 'download');
+    }
+
+    const staging = path.join(o.dir, 'platform-tools.staging');
+    await rm(staging, { recursive: true, force: true });
+    try {
+      await extractZip(await readFile(zipPath), staging, o.log);
+      const from = path.join(staging, 'platform-tools');
+      const entries = await readdir(from);
+      // The executable, plus every top-level DLL the archive carries: on Windows adb.exe
+      // loads its AdbWinApi/AdbWinUsbApi next to itself, and a copy without them is a
+      // file that exists and cannot run.
+      const names = [exe, ...entries.filter((n) => n.toLowerCase().endsWith('.dll'))];
+      for (const n of names) {
+        const dest = path.join(o.dir, n);
+        await copyFile(path.join(from, n), dest);
+        if (o.plat !== 'win32') await chmod(dest, 0o755);
+      }
+      // Google's own attribution travels with Google's binary: the SDK terms ask for the
+      // notice to be kept, and a package that ships adb while dropping the text is a
+      // package that quietly loses it.  Copied verbatim, and *not* made executable.
+      if (entries.includes('NOTICE.txt')) await copyFile(path.join(from, 'NOTICE.txt'), path.join(o.dir, 'NOTICE.txt'));
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+      await rm(zipPath, { force: true });
+    }
+
+    const st = await stat(target).catch(() => undefined);
+    if (!st?.isFile()) throw new AdbError('platform-tools extracted without an adb binary', 'download');
+
+    if (o.plat === currentPlat()) {
+      // Proof that what we just put there runs — only on the platform that can run it; a
+      // cross-fetched binary is for another machine, and this one cannot vouch for it.
+      const version = await Adb.readVersion(target);
+      o.log(`[adb] ${target} (${st.size >> 20} MiB, version ${version})`);
+    } else {
+      o.log(`[adb] ${target} (${st.size >> 20} MiB, for ${o.plat})`);
+    }
+    return target;
+  }
+
+  private static readVersion(exe: string): Promise<string> {
     return new Promise((resolve, reject) => {
       execFile(exe, ['version'], { timeout: 10_000 }, (err, stdout) => {
         if (err) reject(err);
@@ -160,14 +257,14 @@ export class Adb {
     const staging = path.join(o.dataDir, 'platform-tools.staging');
     const target = path.join(o.dataDir, 'platform-tools');
     await extractZip(buf, staging, o.log);
-    await rm_rf(target);
+    await rm(target, { recursive: true, force: true });
     await rename(staging, target);
 
     const exe = path.join(target, adbExeName(o.plat));
     if (o.plat !== 'win32') await chmod(exe, 0o755);
     const st = await stat(exe);
     if (!st.isFile()) throw new AdbError('platform-tools extracted without an adb binary', 'download');
-    const version = await Adb.readVersion(exe, o);
+    const version = await Adb.readVersion(exe);
     o.log(`[adb] installed ${exe} (version ${version})`);
     return version;
   }
@@ -265,9 +362,4 @@ export class Adb {
     await this.run(['start-server'], 20_000).catch(() => undefined);
     this.conflict = false;
   }
-}
-
-async function rm_rf(p: string): Promise<void> {
-  const { rm } = await import('node:fs/promises');
-  await rm(p, { recursive: true, force: true });
 }

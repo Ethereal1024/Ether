@@ -10,16 +10,34 @@ Our own program, built from `udp2tcp.c` in this repository with the Android NDK
 Bionic; it is pushed to `/data/local/tmp` at run time and removed by the app's
 cleanup.  No Google code is included in it.
 
-adb / platform-tools: downloaded, not shipped
----------------------------------------------
-The app never bundles or installs adb.  If no usable adb is found on the machine
-(`$ADB`, then `$PATH`, then the standard Android SDK locations — see
-`src/main/platform.ts`), it downloads `platform-tools-latest-{linux,darwin,windows}.zip`
-from `dl.google.com` into **its own data directory** and uses that copy for its
-own child processes only.  That download is covered by the Android SDK Terms of
-Service / the Android Software Development Kit License Agreement, which is why it
-is kept out of this distribution and out of the system PATH.  Deleting the app's
-data directory removes it completely.
+adb / platform-tools: bundled, and Google's own licence applies to it
+--------------------------------------------------------------------
+The app ships the one dependency it cannot work without, so no machine is ever
+asked to install platform-tools and the first launch after a login — where the
+network is usually not up yet — needs no download:
+
+    resources/platform-tools/linux/adb
+    resources/platform-tools/darwin/adb
+    resources/platform-tools/win32/adb.exe   (+ the AdbWinApi / AdbWinUsbApi DLLs)
+
+`adb` and those DLLs are Google's, from
+`https://dl.google.com/android/repository/platform-tools-latest-<platform>.zip`,
+and the copy in the package is fetched at **package time** by `bin/cli.mjs
+--fetch-adb` (which `npm run dist` runs first).  The repository does not vendor
+the binaries — `.gitignore` excludes `app/resources/platform-tools/` — so a
+source checkout has none, and anyone redistributing a build of this app carries
+Google's terms with it: the Android SDK Terms of Service / the Android Software
+Development Kit License Agreement.  The `NOTICE.txt` Google ships inside
+platform-tools is copied next to each `adb` as the attribution it asks for.
+
+The app still prefers an adb that is already on the machine — `$ADB`, then
+`$PATH`, then the standard Android SDK locations, and only then its own copy (see
+`src/main/platform.ts`) — and it never installs anything system-wide, never
+edits `$PATH`, and never asks for admin for adb.  The run-time download of the
+same archive remains as the last resort: a build whose copy was stripped, or a
+machine where the bundled binary will not start, still ends with a working link.
+That copy lives in the app's own data directory, and deleting the directory
+removes it completely.
 
 Electron, TypeScript, electron-builder: build-time dependencies
 --------------------------------------------------------------

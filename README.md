@@ -15,7 +15,7 @@ app/        the Electron app — this is the product
   test/         node:test suites, run against dist/
   tools/        dev harness: ui-probe (layout), ui-live (real bridge), PNG readers
   docs/         UI screenshots
-  resources/    tablet ELF + NOTICE, copied to resourcesPath when packaged
+  resources/    tablet ELF, NOTICE, and adb (fetched at package time, not committed)
 c-relay/    the C relay and its bench scripts
   udp2tcp.c     the relay itself (host + device roles)
   udp2tcp       host build, used by the CLI and the interop suite
@@ -41,6 +41,22 @@ npm run selftest       # bin/cli.mjs --selftest
 npm run dev            # build + launch the window
 npm run dist           # electron-builder -> app/release/
 ```
+
+`npm run dist*` fetches Google's `platform-tools` first (`node bin/cli.mjs
+--fetch-adb --plat <this platform>`) and copies it into
+`app/resources/platform-tools/<plat>/`, so a built package carries the adb it
+needs and never asks the machine to install one — that directory is
+`.gitignore`d, and the fetch is one command when you want it by hand:
+
+```sh
+cd app
+node bin/cli.mjs --fetch-adb            # this platform; add --plat all for the other two
+node bin/cli.mjs --fetch-adb --force    # fetch again over an existing copy
+```
+
+The app still prefers an adb that is already on the machine (`$ADB`, `$PATH`,
+the Android SDK directories) and falls back to its own copy, and then to a
+run-time download; see `app/resources/NOTICE`.
 
 The C relay must exist before the interop suite runs, or those cases silently
 skip:
