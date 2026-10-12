@@ -227,9 +227,25 @@ export interface AutoConnectDeps {
    * found none (a first run that raced the network, a machine where adb was never
    * installed).  Optional, and expected to be free when adb is already found. */
   provision?: () => Promise<void>;
+  /**
+   * The bus as an event source, when this machine has one (`devwatch.ts`: the adb server
+   * pushes its device list over `host:track-devices`).  Called with `true` whenever that
+   * list changes — which is the one fact this attempt is waiting for — and with `false`
+   * when the stream is gone, so the tick below can go back to being a real poll.
+   *
+   * Optional on purpose: a watch is an optimisation, and a failed one must leave the
+   * behaviour of a machine without it exactly as it was.  Returns the way to detach.
+   */
+  watch?: (cb: (live: boolean) => void) => () => void;
   log: (l: string) => void;
-  /** How often the bus is asked again while waiting. */
+  /** How often the bus is asked again while waiting and nothing is pushing. */
   intervalMs?: number;
+  /** How often it is asked while the event source *is* live.  Rare on purpose: the stream
+   *  covers the device list, and a device list is what this attempt waits on.  What is left
+   *  for this tick is the handful of things no device list can report — Sunshine's port
+   *  appearing, an adb server that moved to another socket, a watch that died without
+   *  saying so. */
+  safetyMs?: number;
   /** How often a missing adb may be looked for again, so a failed download is not
    * retried every tick. */
   provisionEveryMs?: number;
@@ -246,19 +262,34 @@ export interface AutoConnectDeps {
  * status ever woke (nothing polls the bus when the app is idle), and an attempt that gave
  * up on the first refusal from a device that was merely still booting.
  *
- * It is Electron-free on purpose: the timer, the retry and the decision are all testable
- * without a window, and the shell is left with the two calls only it can make.
+ * Waiting is where it is worth being careful about the price.  A tick that forks an adb
+ * client every two seconds is cheap in absolute terms and still wrong: it wakes the adb
+ * server for a USB scan nobody asked for, on a machine that is usually idle, for hours.  So
+ * the wait has two speeds — the event source (`deps.watch`) when this machine has one, and
+ * a tick that stays honest about being a fallback: fast while nothing is pushing, a rare
+ * safety net while the adb server is pushing device changes at us.
+ *
+ * It is Electron-free on purpose: the timer, the watch, the retry and the decision are all
+ * testable without a window, and the shell is left with the two calls only it can make.
  */
 export class AutoConnectAttempt {
   private armed = false;
   private timer?: NodeJS.Timeout;
+  /** The interval the current timer was built with, so a retune is a no-op when it would
+   *  not change the answer. */
+  private timerEvery?: number;
+  private started = false;
+  private watchLive = false;
+  private unwatch?: () => void;
   private busy = false;
   private lastProvision = 0;
   private readonly interval: number;
+  private readonly safety: number;
   private readonly provisionEvery: number;
 
   constructor(private readonly deps: AutoConnectDeps) {
     this.interval = deps.intervalMs ?? 2000;
+    this.safety = deps.safetyMs ?? 30_000;
     this.provisionEvery = deps.provisionEveryMs ?? 30_000;
   }
 
@@ -296,26 +327,70 @@ export class AutoConnectAttempt {
     void this.deps.dial().catch((e) => this.deps.log(`[app] auto-connect failed: ${(e as Error).message}`));
   }
 
+  /**
+   * Begin waiting: attach to the bus if this machine has an event source, and start the
+   * tick that stands behind it.  Idempotent, because `step()` calls it on every status
+   * that says "not yet".
+   */
   private start(): void {
-    if (this.timer) return;
-    // `unref` because a timer must never be the reason a quitting app stays alive.
-    const timer = setInterval(() => void this.poll(), this.interval);
-    timer.unref?.();
-    this.timer = timer;
+    if (this.started) return;
+    this.started = true;
+    this.unwatch = this.deps.watch?.((live) => this.onWatch(live));
+    this.retune();
   }
 
-  private stop(): void {
+  /**
+   * The bus spoke: the device list changed, or the stream that was carrying it went away.
+   * Either way, ask the machine once — and let the tick's speed follow what is pushing.
+   */
+  private onWatch(live: boolean): void {
+    if (!this.armed) return;
+    const changed = live !== this.watchLive;
+    this.watchLive = live;
+    if (changed) this.retune();
+    // `changed || live`: a plain event is a reason to look, and the *first* `false` (no
+    // stream on this machine at all) is not — the poll is about to run anyway.
+    if (changed || live) void this.poll();
+  }
+
+  /**
+   * Build the tick at the speed the current situation deserves: the fast interval while
+   * nothing is pushing, the safety net's while the adb server is.  A timer that is already
+   * right is left alone, so a busy bus cannot keep resetting the safety net.
+   */
+  private retune(): void {
+    const want = this.watchLive ? this.safety : this.interval;
+    if (this.timerEvery === want) return;
+    this.stopTimer();
+    // `unref` because a timer must never be the reason a quitting app stays alive.
+    const timer = setInterval(() => void this.poll(), want);
+    timer.unref?.();
+    this.timer = timer;
+    this.timerEvery = want;
+  }
+
+  private stopTimer(): void {
     if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = undefined;
+    this.timerEvery = undefined;
+  }
+
+  private stop(): void {
+    this.stopTimer();
+    this.started = false;
+    this.watchLive = false;
+    const unwatch = this.unwatch;
+    this.unwatch = undefined;
+    unwatch?.();
   }
 
   /**
    * Ask the machine again, then get out of the way: the decision is not taken here.  The
-   * `refresh()` ends in a status push, and that push runs the one `step()` above — so the
-   * timer cannot dial a link the button would not, and "ready" keeps exactly one
-   * definition.  Overlapping ticks are dropped rather than queued: a slow adb must not
-   * build a backlog of them.
+   * `refresh()` ends in a status push, and that push runs the one `step()` above — so
+   * neither the tick nor the watch can dial a link the button would not, and "ready" keeps
+   * exactly one definition.  Overlapping asks are dropped rather than queued: a slow adb
+   * must not build a backlog of them.
    */
   private async poll(): Promise<void> {
     if (!this.armed) return this.stop();

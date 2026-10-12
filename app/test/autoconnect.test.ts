@@ -164,6 +164,105 @@ test('an app that starts before the tablet waits, then dials by itself', { skip:
   }
 });
 
+test('the adb server pushing the device list is what dials, with no tick in sight', { skip: posixOnly }, async () => {
+  // The same launch as the first test, except that the machine has an event source and
+  // the tick is set an hour away.  Anything that happens below therefore happens because
+  // the bus spoke and for no other reason: this is the answer to "does waiting have to
+  // cost a subprocess every two seconds?" — it does not, when the adb server will push.
+  if (existsSync(stub)) chmodSync(stub, 0o755);
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ether-autoconnect-watch-'));
+  const ledger = path.join(dir, 'adb-reverses');
+  writeFileSync(ledger, '');
+
+  const saved = new Map(KNOBS.map((k) => [k, process.env[k]]));
+  process.env.ADB = stub;
+  process.env.FAKE_ADB_MODE = 'none'; // the app is up, the tablet is not
+  process.env.FAKE_ADB_STATE = ledger;
+  process.env.FAKE_ADB_BENCH = BENCH;
+  delete process.env.FAKE_ADB_FULL;
+
+  const log: string[] = [];
+  let pushes = 0;
+  let dials = 0;
+  let attaches = 0;
+  let detaches = 0;
+  /** What `index.ts` holds: the one live watch, and the way the attempt talks to it. */
+  let speaker: ((live: boolean) => void) | undefined;
+  let c: Controller | undefined;
+  try {
+    c = await Controller.create({
+      dataDir: dir,
+      resourcesDir: path.join(appRoot, 'resources'),
+      skipReap: true,
+      log: (l) => log.push(l),
+    });
+
+    const attempt = new AutoConnectAttempt({
+      settings: () => ON,
+      refresh: async () => {
+        await c?.refresh();
+      },
+      dial: async () => {
+        dials += 1;
+        await c?.up();
+      },
+      // `index.ts`'s watch: attached once, and the callback is kept so the test can be
+      // the adb server.
+      watch: (cb) => {
+        attaches += 1;
+        speaker = cb;
+        return () => {
+          detaches += 1;
+          speaker = undefined;
+        };
+      },
+      log: (l) => log.push(l),
+      intervalMs: 3_600_000, // a tick that will not fire: the stream has to do the work
+      safetyMs: 3_600_000,
+      provisionEveryMs: 60_000,
+    });
+    c.onChange((s) => {
+      pushes += 1;
+      attempt.step(s);
+    });
+
+    attempt.arm();
+    attempt.step(c.status()); // the push at the end of the launch block
+    assert.equal(attaches, 1, 'waiting attaches to the bus exactly once');
+
+    // The bus says it is live — its device list is being pushed to us — and nothing else
+    // is coming.  Waiting on a stream is not asking the machine anything.
+    speaker?.(true);
+    await sleep(200);
+    assert.equal(pushes, 1, `no tick, no question: ${pushes} status${pushes === 1 ? '' : 'es'}`);
+    assert.equal(dials, 0, log.join('\n'));
+
+    // The tablet finishes booting and the user taps Allow.  The adb server's list changes,
+    // the socket carries it to us *without anyone asking*, and that is the whole wake-up.
+    process.env.FAKE_ADB_MODE = 'ok';
+    process.env.FAKE_ADB_FULL = '1';
+    speaker?.(true);
+
+    assert.ok(await waitFor(() => dials > 0), `the push must dial without a poll: ${log.join('\n')}`);
+    assert.equal(dials, 1, 'exactly one dial, from an event and not from a timer');
+    assert.ok(
+      log.includes('[app] auto-connect: the device is ready, starting the wired link'),
+      `the ready line must be logged: ${log.join('\n')}`,
+    );
+
+    // Over means detached: the attempt does not hold a socket to the adb server open for
+    // the rest of the session.
+    assert.equal(detaches, 1, 'the stream is given back when there is nothing left to wait for');
+  } finally {
+    await c?.down().catch(() => undefined);
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the switch off at launch leaves the app quiet, however long the tablet takes', { skip: posixOnly }, async () => {
   // The other half of "it works now": a switch the user left off must not dial because a
   // tablet showed up.  Same wiring, one setting different.

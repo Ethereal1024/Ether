@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
 import { Controller, type Status } from './controller.js';
+import { DeviceWatch } from './devwatch.js';
 import {
   driverMissingFromCsv,
   findInfInList,
@@ -82,12 +83,17 @@ let loginItemOn = false;
  * past idle — never re-armed while the app is open, so the switch means "when you open
  * Ether", not "whenever a cable appears".
  *
- * While it is waiting it polls the bus (see `AutoConnectAttempt`), because the launch
- * this switch is about is the one where nothing is plugged in yet: without a poll no
- * status is ever pushed again, and the attempt would sit armed forever behind a card
- * that still says "No USB device".
+ * While it is waiting it watches the bus rather than hammering it: the adb server's
+ * `host:track-devices` stream (`devwatch.ts`) is the fast path, and a tick behind it is the
+ * fallback — because the launch this switch is about is the one where nothing is plugged in
+ * yet, and without either of them no status is ever pushed again and the attempt would sit
+ * armed forever behind a card that still says "No USB device".
  */
 let autoConnect: AutoConnectAttempt | undefined;
+
+/** The device list, pushed by the adb server instead of asked for on a timer.  One per
+ *  launch, and it outlives the attempt only until the app goes down. */
+let deviceWatch: DeviceWatch | undefined;
 
 /** The user took over, or the app is going down: no attempt of ours may follow it. */
 function disarmAutoConnect(): void {
@@ -630,6 +636,15 @@ function buildAutoConnectAttempt(): AutoConnectAttempt {
     provision: async () => {
       await controller?.ensureAdb();
     },
+    // The bus itself, when this machine will push: one socket to the adb server's
+    // `host:track-devices`, so the moment a device appears is an event and not the next
+    // tick.  The attempt keeps its tick for everything a device list cannot report, and the
+    // watch falls back to that tick by itself if it cannot attach.
+    watch: (cb) => {
+      deviceWatch ??= new DeviceWatch({ env: process.env, log: (l) => process.stdout.write(`${l}\n`) });
+      deviceWatch.start(cb);
+      return () => deviceWatch?.stop();
+    },
     log: (l) => process.stdout.write(`${l}\n`),
   });
 }
@@ -768,6 +783,7 @@ function requireController(): Promise<Controller> {
 /** Closing the window must not leave a relay, a reverse or a tablet process behind. */
 async function teardown(): Promise<void> {
   disarmAutoConnect(); // an app on its way out has nothing left to wait for
+  deviceWatch?.stop(); // nor a socket to the adb server to keep open
   if (!controller) return;
   try {
     await Promise.race([controller.down(), sleep(5000)]);

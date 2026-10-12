@@ -458,6 +458,113 @@ test('the switch off at launch arms nothing at all', () => {
   assert.equal(dials, 0);
 });
 
+// ── waiting for the event, instead of asking 30 times a minute ──────────────
+
+/** The attempt with an event source it can be fired by hand, so these tests are about the
+ *  wiring and not about a real socket (`devwatch.test.ts` drives the socket itself). */
+function withWatch(opts: { intervalMs: number; safetyMs: number }) {
+  const log: string[] = [];
+  let refreshes = 0;
+  let dials = 0;
+  let detaches = 0;
+  let fire: ((live: boolean) => void) | undefined;
+  const attempt = new AutoConnectAttempt({
+    settings: () => ON,
+    refresh: async () => {
+      refreshes += 1;
+    },
+    dial: async () => {
+      dials += 1;
+    },
+    watch: (cb) => {
+      fire = cb;
+      return () => {
+        detaches += 1;
+      };
+    },
+    log: (l) => log.push(l),
+    provisionEveryMs: 60_000,
+    ...opts,
+  });
+  return {
+    attempt,
+    log,
+    fire: (live: boolean) => fire?.(live),
+    armed: () => fire !== undefined,
+    counts: () => ({ refreshes, dials, detaches }),
+  };
+}
+
+test('a live event source is what the attempt waits on: the fast tick stands down', async () => {
+  // The point of the whole exercise.  While the adb server is pushing device changes there
+  // is nothing left to poll *for*, so the two-second tick has to stop — and it has to come
+  // back the moment the push does not.
+  const t = withWatch({ intervalMs: 2, safetyMs: 60_000 });
+
+  t.attempt.arm();
+  t.attempt.step({ state: 'idle' });
+  assert.equal(t.armed(), true, 'waiting must attach to the bus');
+  await sleep(30);
+  assert.ok(t.counts().refreshes > 1, `with no push, the tick asks: saw ${t.counts().refreshes}`);
+
+  // The server attaches and pushes the list: from here the tick is a safety net, not a poll.
+  t.fire(true);
+  await sleep(20);
+  const settled = t.counts().refreshes;
+  await sleep(30);
+  assert.equal(t.counts().refreshes, settled, 'a live stream must stop the fast tick');
+
+  // …and a dead stream puts it back, or a tablet that arrived during the outage would wait
+  // for the rare tick instead of being noticed.
+  t.fire(false);
+  await sleep(30);
+  assert.ok(t.counts().refreshes > settled + 1, `the fast tick must come back: ${t.counts().refreshes}`);
+  t.attempt.disarm();
+});
+
+test('the bus speaking is a reason to ask, and the answer is still the only reason to dial', async () => {
+  // No timer can fire in this test: an hour apart.  Everything that happens, happens
+  // because the adb server said something.
+  const t = withWatch({ intervalMs: 3_600_000, safetyMs: 3_600_000 });
+
+  t.attempt.arm();
+  t.attempt.step({ state: 'idle', device: { state: 'unauthorized' } });
+  await sleep(20);
+  assert.equal(t.counts().refreshes, 0, 'nothing is asked while nothing is pushed');
+  assert.equal(t.counts().dials, 0);
+
+  // A frame that says "the list changed" — the app re-reads and finds the same refusal.
+  t.fire(true);
+  await sleep(10);
+  assert.equal(t.counts().refreshes, 1, 'an event asks the machine once');
+  assert.equal(t.counts().dials, 0, 'and an unauthorized device is still not an answer');
+
+  // The user taps Allow: another frame, another read — and this one is usable.
+  t.attempt.step({ state: 'idle', device: { state: 'device' } });
+  assert.equal(t.counts().dials, 1);
+  assert.equal(t.attempt.pending, false);
+  assert.deepEqual(t.log, ['[app] auto-connect: the device is ready, starting the wired link']);
+
+  // Over means detached: the socket to the adb server is not ours to keep open.
+  assert.equal(t.counts().detaches, 1);
+  t.fire(true);
+  await sleep(10);
+  assert.equal(t.counts().refreshes, 1, 'a disarmed attempt does not answer the bus any more');
+});
+
+test('a machine with no event source waits exactly as it did before there was one', async () => {
+  // "No watch" and "a watch that says it is not live" are the same machine to the attempt:
+  // the tick is the whole mechanism, at the speed it always had.
+  const t = withWatch({ intervalMs: 2, safetyMs: 60_000 });
+  t.attempt.arm();
+  t.attempt.step({ state: 'idle' });
+  t.fire(false); // what a watch reports when it cannot attach at all
+  await sleep(30);
+  assert.ok(t.counts().refreshes > 1, `the tick is the answer without a stream: ${t.counts().refreshes}`);
+  t.attempt.disarm();
+  assert.equal(t.counts().detaches, 1);
+});
+
 // ── what closing the window means ───────────────────────────────────────────
 
 test('closing the window keeps the link up: to the tray when there is one, to the taskbar when there is not', () => {
