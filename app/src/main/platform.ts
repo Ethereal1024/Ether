@@ -8,6 +8,10 @@ import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+// The rule's own path is declared where the op that writes it is: this module prints it,
+// it does not decide it (see the note on `udevHint`).  `elevate.ts` imports from here
+// only as a type, so this is not a cycle at run time.
+import { rulePath } from './elevate.js';
 
 export type Plat = 'linux' | 'darwin' | 'win32';
 
@@ -181,15 +185,15 @@ function normalizeVid(s: string): string | undefined {
  * own consent prompt (`elevate.ts`, op `grantDeviceAccess`), so no user is ever asked to
  * open a terminal.  What this function exists for is the machine where that prompt
  * cannot be raised at all (no `pkexec`, no desktop session) or where the user dismissed
- * it — there, one command to paste beats a dead end.  `/etc/udev/rules.d` appears here
- * and in `elevate.ts` and nowhere else, so the file the app writes and the file it prints
- * can never drift apart.
+ * it — there, one command to paste beats a dead end.  The path comes from `rulePath` in
+ * the module that declares the op, so the file the app writes and the file it prints are
+ * one answer rather than two that have to be kept in step.
  */
 export function udevHint(vendorId: string): string {
   const vid = normalizeVid(vendorId);
   if (!vid) throw new Error(`udevHint: vendor id must be 4 hex digits, got '${vendorId}'`);
   const lines = [
-    `echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="${vid}", MODE="0666"' | sudo tee /etc/udev/rules.d/51-android.rules`,
+    `echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="${vid}", MODE="0666"' | sudo tee ${rulePath(vid)}`,
     'sudo udevadm control --reload-rules && sudo udevadm trigger',
   ];
   return lines.join('\n');

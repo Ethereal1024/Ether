@@ -155,15 +155,27 @@ test('a prompt is raised only when the remedy button is pressed', () => {
   assert.match(index, /privSteps\(op\)\.map\(stepText\)\.join\(' && '\)/);
 });
 
-test('the rule file is written by install(1), and its path is named in two files', () => {
+test('the rule file is written by install(1), and its path comes from one builder', () => {
   // `/etc/udev/rules.d` may be *named* by the module that declares the rule and by the
-  // module that prints the fallback; copying into it happens through the broker.
+  // module that reads the rule dirs and prints the fallback; copying into it happens
+  // through the broker.  The *path* of our own file, though, is built in exactly one
+  // place, so the file the app writes and the file it prints are one answer rather than
+  // two that have to be kept in step — and it is a per-vendor drop-in, never the shared
+  // `51-android.rules` a how-to already filled with the user's other devices.
   const withRulePath = appSources.filter(([, text]) => /\/etc\/udev\/rules\.d/.test(text)).map(([f]) => f);
   assert.deepEqual(withRulePath.sort(), [ELEVATE, PLATFORM].sort());
 
+  const elevate = readFileSync(path.join(srcMain, 'elevate.ts'), 'utf8');
+  assert.match(elevate, /export function rulePath\(/);
+  const spelled = appSources.filter(([, text]) => /51-android-\$\{\w/.test(text)).map(([f]) => f);
+  assert.deepEqual(spelled, [ELEVATE], 'the rule file name is spelled by one builder');
+  // The printed half uses that builder rather than a path of its own, which is what makes
+  // "one answer" a property of the code and not a promise in a comment.
+  const platform = readFileSync(path.join(srcMain, 'platform.ts'), 'utf8');
+  assert.match(platform, /sudo tee \$\{rulePath\(/, 'the fallback prints the builder\u2019s path');
+
   // The rule text is staged by the unprivileged half and copied by `install`, so the
   // privileged argv needs no redirection — which is why it needs no shell.
-  const elevate = readFileSync(path.join(srcMain, 'elevate.ts'), 'utf8');
   assert.match(elevate, /\{ file: 'install', args: \['-m', '0644'/);
 });
 

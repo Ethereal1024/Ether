@@ -153,7 +153,7 @@ test('a tablet the user cannot reach ships the udev commands in `hint` (§3.4 ro
     assert.equal(json.state, 'error');
     assert.equal(json.messageKey, 'noPermissions');
     assert.ok(json.hint, 'noPermissions without the commands is not actionable');
-    assert.match(json.hint, /ATTR\{idVendor\}=="17ef", MODE="0666"'.* \| sudo tee .*udev\/rules\.d\/51-android\.rules/);
+    assert.match(json.hint, /ATTR\{idVendor\}=="17ef", MODE="0666"'.* \| sudo tee .*udev\/rules\.d\/51-android-17ef\.rules/);
     assert.match(json.hint, /udevadm control --reload-rules/);
     assert.ok(!json.hint.includes('<'), 'a placeholder is a hint the user has to edit');
     // Two lines, both commands: a paragraph the user has to edit is not a hint.
@@ -161,7 +161,7 @@ test('a tablet the user cannot reach ships the udev commands in `hint` (§3.4 ro
     assert.deepEqual(Object.keys(json), FROZEN.filter((k) => Object.keys(json).includes(k)));
 
     const text = run(['--state'], env);
-    assert.match(text.stdout, /hint\s+:.*51-android\.rules/);
+    assert.match(text.stdout, /hint\s+:.*51-android-17ef\.rules/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -237,8 +237,12 @@ test('--state without --json prints something a human can read on stdout', { ski
 
 test('with no adb to be found, the CLI still answers with a catalogue sentence', { skip: posixOnly }, async () => {
   // Deliberately not asserting *which* sentence: this machine may or may not have
-  // a real adb elsewhere on it.  What must hold is that the app never crashes and
-  // always says one of the 13 actionable things.
+  // a real adb elsewhere on it, and the copy the app ships with (platform.ts step 7)
+  // is found even when $ADB is a void — so on a machine with a tablet plugged in the
+  // premise of this test is not "no adb" but "the shipped adb, on real hardware".
+  // What must hold either way is that the app never crashes and never invents a
+  // sentence: it is either one of the 13 actionable things, or the deliberate
+  // silence of an `idle` device that is missing nothing (§3.4 has no row for it).
   const dir = tmpDir();
   try {
     const r = run(['--state', '--json'], {
@@ -249,11 +253,18 @@ test('with no adb to be found, the CLI still answers with a catalogue sentence',
       XDG_CONFIG_HOME: path.join(dir, 'cfg'),
     });
     assert.ok(r.status === 0 || r.status === 1, `unexpected exit ${r.status}: ${r.stderr}`);
-    const json = JSON.parse(r.stdout) as { messageKey?: string };
+    const json = JSON.parse(r.stdout) as { messageKey?: string; state?: string; message?: string };
     assert.ok(
-      ['adbMissing', 'noDevice', 'noPermissions', 'noSunshine', 'noMoonlight', 'ready'].includes(json.messageKey ?? ''),
+      json.messageKey === undefined ||
+        ['adbMissing', 'noDevice', 'noPermissions', 'noSunshine', 'noMoonlight', 'ready'].includes(json.messageKey),
       `unexpected messageKey ${json.messageKey}`,
     );
+    if (json.messageKey === undefined) {
+      // Silence is only honest when the state itself is the answer: a usable device,
+      // Moonlight on it and Sunshine on this PC — "press Connect", not a complaint.
+      assert.equal(json.state, 'idle', `no sentence for state ${json.state}`);
+      assert.equal(json.message, '', 'no key means no words either');
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

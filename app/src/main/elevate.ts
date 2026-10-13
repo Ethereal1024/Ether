@@ -63,17 +63,38 @@ export function packageArgs(manager: PackageManager, packages: readonly string[]
   }
 }
 
+/** One vendor id, or a refusal.  Everything below is built from this, so a value that is
+ * not four hex digits never reaches a file the *system* reads. */
+function vendorIdOf(vendorId: string): string {
+  const vid = vendorId.trim().toLowerCase();
+  if (!/^[0-9a-f]{4}$/.test(vid)) throw new Error(`not a USB vendor id: '${vendorId}'`);
+  return vid;
+}
+
 /** The udev rule that lets the user's own session reach an Android device.  One shared
  * builder, so the file this app writes and the command it prints can never drift. */
 export function udevRuleLine(vendorId: string): string {
-  const vid = vendorId.trim().toLowerCase();
-  if (!/^[0-9a-f]{4}$/.test(vid)) throw new Error(`not a USB vendor id: '${vendorId}'`);
-  return `SUBSYSTEM=="usb", ATTR{idVendor}=="${vid}", MODE="0666"`;
+  return `SUBSYSTEM=="usb", ATTR{idVendor}=="${vendorIdOf(vendorId)}", MODE="0666"`;
 }
 
-/** Where the rule goes.  A drop-in of our own: `51-android.rules` is the name every
- * Android how-to uses, so a machine that already followed one keeps working. */
-export const RULE_PATH = '/etc/udev/rules.d/51-android.rules';
+/**
+ * Where the rule goes: one file per vendor, beside — never over — the `51-android.rules`
+ * every Android how-to tells people to write.
+ *
+ * That shared name is why this is per-vendor.  A machine that followed one of those
+ * how-tos has *its own* rules in `/etc/udev/rules.d/51-android.rules`, often for several
+ * devices, and `install(1)` writes a whole file: the fix for vendor A used to silently
+ * drop vendor B from a file the user wrote by hand, which is a bug the user cannot see
+ * until a device stops working.  `51-android-<vid>.rules` adds a drop-in instead, and a
+ * machine that already has a rule for this vendor never gets here at all (the fix is
+ * offered only when `udevRuleInstalled` says nothing grants it).
+ *
+ * The name is what udev sorts by, so `51-` keeps our drop-in in the same slot as the
+ * how-to files it sits next to.
+ */
+export function rulePath(vendorId: string): string {
+  return `/etc/udev/rules.d/51-android-${vendorIdOf(vendorId)}.rules`;
+}
 
 /** The privileged work this app is allowed to do — the complete list. */
 export type PrivOp =
@@ -90,8 +111,15 @@ export type PrivOp =
  */
 export type FixKind = 'grantDeviceAccess' | 'installUsbDriver' | 'installTraySupport';
 
-/** What one remedy can end with.  A dismissal is an answer, not a failure. */
-export type FixReason = 'done' | 'refused' | 'failed' | 'noBroker';
+/**
+ * What one remedy can end with.  A dismissal is an answer, not a failure.
+ *
+ * `notBound` is the one outcome that is neither: every step ran and exited 0 — the driver
+ * is on the machine now — but the thing the remedy was *for* still is not true
+ * (`index.ts` re-probes and finds the device still without one).  Reporting `done` there
+ * would be the receipt claiming something nobody verified.
+ */
+export type FixReason = 'done' | 'refused' | 'failed' | 'noBroker' | 'notBound';
 
 export interface FixResult {
   ok: boolean;

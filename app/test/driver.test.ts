@@ -16,7 +16,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  DRIVER_RECHECK_MS,
+  DRIVER_RECHECK_TICK_MS,
   driverMissingFromCsv,
+  driverRecheckDue,
   findInfInList,
   pnpQueryArgv,
   USB_DRIVER_INF,
@@ -104,4 +107,40 @@ test('the driver file is the one Google shipped, and the fetch is Google-s own U
   assert.equal(findInfInList(['nothing/here.dll']), undefined);
   // A repackaged tree still resolves: the name is looked for case-insensitively.
   assert.equal(findInfInList(['DRIVER/Android_WinUSB.INF']), 'DRIVER/Android_WinUSB.INF');
+});
+
+// ── asking again, after the launch's own probe ──────────────────────────────
+
+test('a device plugged in after the launch is asked about again, and not asked about constantly', () => {
+  const base = { hasDevice: false, busy: false, msSinceProbe: DRIVER_RECHECK_MS };
+  // No device in sight: the card is waiting for a cable, and that is the one state where a
+  // driver-less device can appear without adb, or any status, ever saying so.
+  assert.equal(driverRecheckDue(base), true);
+  assert.equal(driverRecheckDue({ ...base, msSinceProbe: DRIVER_RECHECK_MS - 1 }), false, 'too soon');
+  assert.equal(driverRecheckDue({ ...base, msSinceProbe: DRIVER_RECHECK_MS * 100 }), true);
+
+  // A device adb can see has already answered the driver question, so a tick in that state
+  // would be a process spent on a question nobody asked.
+  assert.equal(driverRecheckDue({ ...base, hasDevice: true }), false);
+  // ...and a probe already in flight is the same question arriving twice.
+  assert.equal(driverRecheckDue({ ...base, busy: true }), false);
+
+  // The window coming to the front asks now rather than at the next tick: the user who has
+  // just plugged the cable in is looking at the card.
+  assert.equal(driverRecheckDue({ hasDevice: false, busy: false, msSinceProbe: 0, force: true }), true);
+  // ...but the two facts above still win over "now": neither a visible device nor a probe
+  // in flight becomes a second question because the window moved.
+  assert.equal(driverRecheckDue({ hasDevice: true, busy: false, msSinceProbe: 0, force: true }), false);
+  assert.equal(driverRecheckDue({ hasDevice: false, busy: true, msSinceProbe: 0, force: true }), false);
+
+  // A launch that has never probed is due, whatever the clock says.
+  assert.equal(driverRecheckDue({ hasDevice: false, busy: false, msSinceProbe: Number.POSITIVE_INFINITY }), true);
+});
+
+test('the tick is shorter than the interval, so a late timer does not cost a whole round', () => {
+  // The decision is a comparison, so a tick that lands a millisecond early must not push
+  // the answer out to a second interval: an interval that only accepts its own tick would
+  // turn a 15 s cadence into a 30 s one on any host whose timers drift late.
+  assert.ok(DRIVER_RECHECK_TICK_MS < DRIVER_RECHECK_MS);
+  assert.ok(DRIVER_RECHECK_TICK_MS > 0);
 });

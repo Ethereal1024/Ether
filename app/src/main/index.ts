@@ -20,7 +20,9 @@ import path from 'node:path';
 import { Controller, type Status } from './controller.js';
 import { DeviceWatch } from './devwatch.js';
 import {
+  DRIVER_RECHECK_TICK_MS,
   driverMissingFromCsv,
+  driverRecheckDue,
   findInfInList,
   pnpQueryArgv,
   USB_DRIVER_INF,
@@ -31,7 +33,7 @@ import { downloadToFile } from './download.js';
 import {
   brokerCandidates,
   privSteps,
-  RULE_PATH,
+  rulePath,
   runPrivOp,
   stepText,
   udevRuleLine,
@@ -197,17 +199,56 @@ function probeTraySupport(): void {
  * Is an Android device on the bus without a working driver?  Windows only, and the
  * query itself is unprivileged (`Get-PnpDevice` never needs rights); the *install* is
  * the elevated half, in `elevate.ts`.
+ *
+ * One question at a time: a probe is a process, and a caller that arrives while one is in
+ * flight waits for that answer instead of starting a second.  The launcher of this
+ * question is not always an event — see `maybeRecheckDriver`.
  */
-async function probeUsbDriver(): Promise<void> {
+let driverProbe: Promise<void> | undefined;
+/** When the last probe started, so "ask again" can be a question about elapsed time
+ * rather than a second timer per reason.  `0` means "never asked", which is due. */
+let lastDriverProbe = 0;
+
+function probeUsbDriver(): Promise<void> {
   if (PLAT !== 'win32') {
     driverMissing = false;
-    return;
+    return Promise.resolve();
   }
-  const argv = pnpQueryArgv();
-  const { out } = await run(argv[0]!, argv.slice(1));
-  const missing = driverMissingFromCsv(out);
-  if (missing !== driverMissing) process.stdout.write(`[driver] android device without a driver: ${missing}\n`);
-  driverMissing = missing;
+  driverProbe ??= (async () => {
+    lastDriverProbe = Date.now();
+    try {
+      const argv = pnpQueryArgv();
+      const { out } = await run(argv[0]!, argv.slice(1));
+      const missing = driverMissingFromCsv(out);
+      if (missing !== driverMissing) process.stdout.write(`[driver] android device without a driver: ${missing}\n`);
+      driverMissing = missing;
+    } finally {
+      driverProbe = undefined;
+    }
+  })();
+  return driverProbe;
+}
+
+/**
+ * Ask the bus again, on the two occasions a launch's own probe cannot cover.
+ *
+ * The gap this closes: a device plugged in *after* the app started, with no driver, never
+ * reaches adb at all — so no serial changes, `noteSerial` never fires, and the "Install
+ * USB driver" button stays hidden until the next restart.  Two triggers, because the
+ * window may be in the background or in front when the cable goes in: a slow tick while
+ * the card has no device to talk about, and the window coming to the front.  Both go
+ * through `driverRecheckDue`, which keeps "no device yet" from meaning "ask the PnP
+ * database every five seconds for the rest of the session".
+ */
+function maybeRecheckDriver(force = false): void {
+  if (PLAT !== 'win32') return;
+  const due = driverRecheckDue({
+    hasDevice: Boolean(lastStatus?.device),
+    busy: Boolean(driverProbe),
+    msSinceProbe: Date.now() - lastDriverProbe,
+    force,
+  });
+  if (due) void refreshDriverFix();
 }
 
 /** Would the desktop's own consent broker be there?  A path question, never a spawn: an
@@ -245,7 +286,11 @@ async function buildFixOp(kind: FixKind): Promise<PrivOp | undefined> {
     const serial = lastStatus?.device?.serial ?? '';
     const vid = udevVendorId({ serial, env: process.env });
     if (!vid) return undefined;
-    const staged = path.join(DATA_DIR, `51-android-${vid}.rules`);
+    // Staged under the rule's own file name, in the app's own data dir: the privileged
+    // half is one `install(1)` of a file this app wrote, and the name it lands under is
+    // the one builder's (`rulePath`), so the two can never disagree.
+    const target = rulePath(vid);
+    const staged = path.join(DATA_DIR, path.basename(target));
     try {
       mkdirSync(DATA_DIR, { recursive: true });
       writeFileSync(staged, `${udevRuleLine(vid)}\n`);
@@ -253,7 +298,7 @@ async function buildFixOp(kind: FixKind): Promise<PrivOp | undefined> {
       process.stdout.write(`[fix] could not stage the rule: ${(e as Error).message}\n`);
       return undefined;
     }
-    return { kind, vendorId: vid, rulePath: RULE_PATH, stagedFile: staged };
+    return { kind, vendorId: vid, rulePath: target, stagedFile: staged };
   }
 
   if (kind === 'installTraySupport') {
@@ -309,7 +354,14 @@ async function runFix(): Promise<{ kind: FixKind; result: FixResult } | undefine
       probeTraySupport();
       ensureTray();
     }
-    if (kind === 'installUsbDriver') await probeUsbDriver();
+    if (kind === 'installUsbDriver') {
+      // Two questions, two answers: `res.ok` says the driver is on the machine now, and
+      // the probe says whether Windows bound it to the device — which is the thing the
+      // button promised.  A receipt that says Done while the device still has no driver
+      // is the app reporting its own exit code instead of the user's outcome.
+      await probeUsbDriver();
+      if (driverMissing) return { kind, result: { ok: false, reason: 'notBound' } };
+    }
   }
   return { kind, result: { ok: res.ok, reason } };
 }
@@ -898,6 +950,15 @@ if (!gotLock) {
     // One driver question at startup (Windows), and one every time the cable changes
     // device: nothing is remembered between launches.
     void refreshDriverFix();
+
+    // ...and the two occasions that startup probe cannot cover: a slow tick while the
+    // card is waiting for a cable, and the window coming to the front — because a
+    // driver-less device plugged in after launch never reaches adb, so no status ever
+    // changes and nothing else in the app would notice it (`maybeRecheckDriver`).
+    if (PLAT === 'win32') {
+      setInterval(() => maybeRecheckDriver(), DRIVER_RECHECK_TICK_MS);
+      w.on('focus', () => maybeRecheckDriver(true));
+    }
 
     app.on('activate', () => {
       showWindow();

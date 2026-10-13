@@ -26,7 +26,7 @@ import {
   quoteAppleScript,
   quotePowershell,
   quoteSh,
-  RULE_PATH,
+  rulePath,
   runPrivOp,
   stepText,
   udevRuleLine,
@@ -43,7 +43,7 @@ type DeviceOp = Extract<PrivOp, { kind: 'grantDeviceAccess' }>;
 const op = (over: Partial<DeviceOp> = {}): DeviceOp => ({
   kind: 'grantDeviceAccess',
   vendorId: '18d1',
-  rulePath: RULE_PATH,
+  rulePath: rulePath('18d1'),
   stagedFile: '/home/me/.config/ether/51-android-18d1.rules',
   ...over,
 });
@@ -63,6 +63,24 @@ test('the rule this app writes is the rule it prints, and a vendor id is four he
   // The group clause is deliberately absent: the mode bit is what adb needs, and the
   // group it would name does not exist on every distro.
   assert.doesNotMatch(udevRuleLine('18d1'), /GROUP=/);
+});
+
+test('the rule lands in a file of its own, never over the one a how-to wrote', () => {
+  // `/etc/udev/rules.d/51-android.rules` is the name every Android how-to tells people to
+  // write, and a machine that followed one keeps *its* vendors in it.  `install(1)` writes
+  // a whole file, so writing our rule there would delete a rule the user wrote by hand —
+  // one device would stop working so that another could start.
+  assert.equal(rulePath('18d1'), '/etc/udev/rules.d/51-android-18d1.rules');
+  assert.equal(rulePath(' 18D1 '), rulePath('18d1'), 'case and padding are not part of a vendor id');
+  assert.notEqual(rulePath('18d1'), '/etc/udev/rules.d/51-android.rules');
+  assert.notEqual(rulePath('18d1'), rulePath('17ef'), 'two vendors, two files');
+  // The directory is the one udev reads, spelled the way systemd spells it.
+  assert.ok(rulePath('18d1').startsWith('/etc/udev/rules.d/'));
+  // ...and a path is not a place a value can travel into: anything that is not a vendor
+  // id is refused here rather than named in a file the system reads.
+  for (const bad of ['', '18d', '../../etc/passwd', '$(id)', '18d1/../x']) {
+    assert.throws(() => rulePath(bad), `accepted '${bad}'`);
+  }
 });
 
 test('a package name is a closed vocabulary, and one that could travel in is refused', () => {
@@ -93,7 +111,7 @@ test('granting device access is install(1) copying a staged file, never a shell 
     steps.map((s) => s.file),
     ['install', 'udevadm', 'udevadm'],
   );
-  assert.deepEqual(steps[0]?.args, ['-m', '0644', op().stagedFile, RULE_PATH]);
+  assert.deepEqual(steps[0]?.args, ['-m', '0644', op().stagedFile, rulePath('18d1')]);
   assert.deepEqual(steps[1]?.args, ['control', '--reload-rules']);
   assert.deepEqual(steps[2]?.args, ['trigger']);
   // The file is written by the unprivileged half (index.ts), so no step needs to
@@ -134,9 +152,9 @@ test('every remedy the window can name has steps behind it', () => {
 // ── the broker ─────────────────────────────────────────────────────────────
 
 test('Linux hands the argv to pkexec as an argv: the program is never a shell string', () => {
-  const step: Step = { file: 'install', args: ['-m', '0644', '/tmp/a b.rules', RULE_PATH] };
+  const step: Step = { file: 'install', args: ['-m', '0644', '/tmp/a b.rules', rulePath('18d1')] };
   const argv = brokerArgv('linux', step);
-  assert.deepEqual(argv, ['pkexec', 'install', '-m', '0644', '/tmp/a b.rules', RULE_PATH]);
+  assert.deepEqual(argv, ['pkexec', 'install', '-m', '0644', '/tmp/a b.rules', rulePath('18d1')]);
   // The path with a space stays *one* element: nothing re-splits it.
   assert.equal(argv.filter((a) => a === '/tmp/a b.rules').length, 1);
   assert.equal(brokerTool('linux'), 'pkexec');
@@ -195,7 +213,7 @@ test('a dismissal is told apart from a failure, on every platform', () => {
 });
 
 test('a step is spelled the way a user would type it, quoting only what needs it', () => {
-  assert.equal(stepText({ file: 'install', args: ['-m', '0644', '/tmp/x.rules', RULE_PATH] }), `install -m 0644 /tmp/x.rules ${RULE_PATH}`);
+  assert.equal(stepText({ file: 'install', args: ['-m', '0644', '/tmp/x.rules', rulePath('18d1')] }), `install -m 0644 /tmp/x.rules ${rulePath('18d1')}`);
   assert.equal(stepText({ file: 'install', args: ['a b'] }), "install 'a b'");
   // The fallback text is for a human to paste: a `|` in it is a command, which is why
   // the argv never contains one.

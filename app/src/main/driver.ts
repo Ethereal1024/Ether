@@ -68,6 +68,46 @@ export function driverMissingFromCsv(text: string, known: readonly string[] = AN
 }
 
 /**
+ * How long the app may go without asking the bus again, while no device is visible.
+ *
+ * The startup probe is not enough on its own: a device plugged in with no driver never
+ * appears in adb's list (`Get-PnpDevice` sees it, adb does not), so no serial changes and
+ * nothing else in the app has a reason to look.  The window would sit on "No USB device"
+ * with the fix for it hidden until the next launch.
+ */
+export const DRIVER_RECHECK_MS = 15_000;
+
+/** How often that question is *asked*.  Shorter than the interval above on purpose: the
+ * decision is a comparison, and a tick that lands a millisecond early must not cost a
+ * whole extra interval — the answer is due at 15 s, not at 15 s if the timer agrees. */
+export const DRIVER_RECHECK_TICK_MS = 5_000;
+
+export interface DriverRecheck {
+  /** An adb device is visible right now.  A driver-less one is invisible, which is the
+   * whole reason this question exists. */
+  hasDevice: boolean;
+  /** A probe is already in flight: a second one would be the same process asking the same
+   * question, and its answer is the one already coming. */
+  busy: boolean;
+  /** Milliseconds since the last probe started, whatever asked for it. */
+  msSinceProbe: number;
+  /** Ask now rather than at the next tick — the window just came to the front, and a user
+   * who has just plugged the cable in is looking at the card. */
+  force?: boolean;
+}
+
+/**
+ * Is it time to ask the PnP database again?  The whole decision, so it can be tested
+ * without a Windows machine and without waiting for a timer: with a device in sight the
+ * question is the device's own (`adb` answers it), with a probe in flight the answer is
+ * already on its way, and otherwise it is a matter of elapsed time.
+ */
+export function driverRecheckDue(o: DriverRecheck): boolean {
+  if (o.hasDevice || o.busy) return false;
+  return o.force === true || o.msSinceProbe >= DRIVER_RECHECK_MS;
+}
+
+/**
  * Which file inside the extracted package is the driver.  Google's zip has exactly one
  * `.inf` (`usb_driver/android_winusb.inf`), but the name is looked for first so a
  * repackaged or renamed tree still resolves — and any other `.inf` is the fallback,

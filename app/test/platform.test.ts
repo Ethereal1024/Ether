@@ -26,6 +26,7 @@ import {
   vendorIdFromLsusb,
   vendorIdFromSysfs,
 } from '../src/main/platform.js';
+import { rulePath } from '../src/main/elevate.js';
 
 const posixOnly = process.platform === 'win32' ? 'POSIX-only test' : false;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -141,10 +142,13 @@ test('udevHint is two copy-pasteable commands with a real vendor id, not a tutor
   assert.equal(lines.length, 2, 'a hint the user has to edit is not a hint');
   assert.equal(
     lines[0],
-    `echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="17ef", MODE="0666"' | sudo tee /etc/udev/rules.d/51-android.rules`,
+    `echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="17ef", MODE="0666"' | sudo tee /etc/udev/rules.d/51-android-17ef.rules`,
   );
   assert.equal(lines[1], 'sudo udevadm control --reload-rules && sudo udevadm trigger');
   assert.ok(!hint.includes('<'), 'a placeholder would be a command the user has to edit');
+  // The file it prints is the file the app itself writes (`rulePath`), so the fallback and
+  // the button cannot disagree — and it is not the how-to file other vendors live in.
+  assert.ok(hint.includes(rulePath('17ef')), 'one path, one builder');
   // Asking for the old `<VENDOR_ID>` shape must fail loudly, not emit a broken rule.
   assert.throws(() => udevHint('<VENDOR_ID>'), /4 hex digits/);
   assert.throws(() => udevHint(''), /4 hex digits/);

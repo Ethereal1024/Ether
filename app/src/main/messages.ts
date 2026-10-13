@@ -164,6 +164,10 @@ export interface UiLabels {
   fixRefused: string;
   fixFailed: string;
   fixNoBroker: string;
+  /** The driver install that ran clean and did not take: the one outcome where the
+   * remedy's own steps all succeeded and the thing it was for still is not true, so it
+   * may not be reported as done.  An action, like every other sentence here. */
+  fixNotBound: string;
   /** Shown when this desktop has no tray at all, so "close keeps the link" is not a
    * promise the user has to discover the meaning of. */
   trayMissing: string;
@@ -227,6 +231,7 @@ export const UI: UiLabels = {
   fixRefused: 'Dismissed: nothing was changed',
   fixFailed: 'The change could not be made',
   fixNoBroker: 'This desktop cannot ask for elevated rights: run the command below',
+  fixNotBound: 'The driver is installed but Windows still has not bound it to the device: unplug and replug the cable',
   trayMissing: 'No tray icon on this desktop: closing the window minimises it instead, and the link stays up',
   showWindow: 'Show Ether',
   quit: 'Quit Ether',

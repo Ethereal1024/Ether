@@ -128,7 +128,7 @@ const FIX_LABELS = {
 };
 
 /** How the last press ended. A dismissal is an answer and is drawn as one. */
-const FIX_NOTES = { done: 'fixDone', refused: 'fixRefused', failed: 'fixFailed', noBroker: 'fixNoBroker' };
+const FIX_NOTES = { done: 'fixDone', refused: 'fixRefused', failed: 'fixFailed', noBroker: 'fixNoBroker', notBound: 'fixNotBound' };
 
 // ── drawing helpers ─────────────────────────────────────────────────────────
 

@@ -24,6 +24,8 @@ import {
 
 const UBUNTU = 'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n';
 const FEDORA = 'NAME="Fedora Linux"\nID=fedora\nVERSION_ID=40\n';
+const ALPINE = 'NAME="Alpine Linux"\nID=alpine\n';
+const OPEN_SUSE = 'NAME="openSUSE Tumbleweed"\nID=opensuse-tumbleweed\nID_LIKE="opensuse suse"\n';
 const ARCH = 'NAME="Arch Linux"\nID=arch\n';
 
 /** A desktop that answers every question the way the caller says. */
@@ -45,10 +47,23 @@ test('a distro says what it is built on, and a family this app has never seen ge
   assert.equal(distroFamily('pop', 'ubuntu'), 'debian');
   assert.equal(distroFamily('fedora'), 'fedora');
   assert.equal(distroFamily('rocky', 'rhel centos fedora'), 'fedora');
-  // The package names below are ones this project has seen work; anything else is a
-  // sentence rather than a guessed package manager invocation.
-  assert.equal(distroFamily('arch'), undefined);
+  // A derivative arrives through the base it says it is built on, so every respin does
+  // not need a line here.
+  assert.equal(distroFamily('arch'), 'arch');
+  assert.equal(distroFamily('manjaro', 'arch'), 'arch');
+  assert.equal(distroFamily('endeavouros', 'arch'), 'arch');
+  assert.equal(distroFamily('opensuse-tumbleweed', 'opensuse suse'), 'suse');
+  assert.equal(distroFamily('sles', 'suse'), 'suse');
+  assert.equal(distroFamily('geckolinux', 'opensuse-tumbleweed'), 'suse');
+  // The package names below are ones this project has checked against the distro's own
+  // repositories; anything else is a sentence rather than a guessed package manager
+  // invocation.
   assert.equal(distroFamily('alpine'), undefined);
+  assert.equal(distroFamily('void'), undefined);
+  // An immutable-root openSUSE does arrive as the suse family — it says so — and its own
+  // root is what refuses the install, with the receipt reporting that.  A machine this app
+  // cannot drive is not the same thing as a package name it guessed.
+  assert.equal(distroFamily('opensuse-microos', 'opensuse suse'), 'suse');
   assert.equal(distroFamily('', ''), undefined);
 });
 
@@ -61,11 +76,22 @@ test('the two ids are read out of os-release, quotes and all', () => {
   assert.deepEqual(osReleaseIds('# a comment\nID=arch\n'), { id: 'arch', like: '' });
 });
 
-test('the fix names the packages and the manager of the family it knows', () => {
-  assert.deepEqual(familyFix('debian'), { manager: 'apt-get', packages: ['gnome-shell-extension-appindicator', 'libayatana-appindicator3-1'] });
-  assert.deepEqual(familyFix('fedora'), { manager: 'dnf', packages: ['gnome-shell-extension-appindicator', 'libappindicator-gtk3'] });
-  assert.equal(familyFix(undefined), undefined);
-  assert.equal(fixPackages(familyFix('debian')!), 'gnome-shell-extension-appindicator libayatana-appindicator3-1');
+test('the fix names the one package that is missing, per family, and nothing where the name is unknown', () => {
+  // The press installs the thing the reason says is missing — not a bundle that would
+  // also drag a GNOME extension onto a KDE session.
+  assert.deepEqual(familyFix('debian', 'appindicator-library'), { manager: 'apt-get', packages: ['libayatana-appindicator3-1'] });
+  assert.deepEqual(familyFix('debian', 'sni-host'), { manager: 'apt-get', packages: ['gnome-shell-extension-appindicator'] });
+  assert.deepEqual(familyFix('fedora', 'appindicator-library'), { manager: 'dnf', packages: ['libappindicator-gtk3'] });
+  assert.deepEqual(familyFix('fedora', 'sni-host'), { manager: 'dnf', packages: ['gnome-shell-extension-appindicator'] });
+  // Arch and openSUSE, whose names are checked against their own repositories: Arch keeps
+  // both in `extra`, openSUSE ships the library and packages no extension at all.
+  assert.deepEqual(familyFix('arch', 'appindicator-library'), { manager: 'pacman', packages: ['libayatana-appindicator'] });
+  assert.deepEqual(familyFix('arch', 'sni-host'), { manager: 'pacman', packages: ['gnome-shell-extension-appindicator'] });
+  assert.deepEqual(familyFix('suse', 'appindicator-library'), { manager: 'zypper', packages: ['libayatana-appindicator3-1'] });
+  assert.equal(familyFix('suse', 'sni-host'), undefined, 'a package that does not exist is not an install');
+
+  assert.equal(familyFix(undefined, 'appindicator-library'), undefined);
+  assert.equal(fixPackages(familyFix('arch', 'appindicator-library')!), 'libayatana-appindicator');
 });
 
 // ── the question ────────────────────────────────────────────────────────────
@@ -90,7 +116,7 @@ test('a GNOME session with no host extension is missing, and knows what to insta
   assert.deepEqual(missingHost, {
     ok: false,
     reason: 'sni-host',
-    fix: { manager: 'apt-get', packages: ['gnome-shell-extension-appindicator', 'libayatana-appindicator3-1'] },
+    fix: { manager: 'apt-get', packages: ['gnome-shell-extension-appindicator'] },
     detail: 'this GNOME session has no app-indicator extension enabled',
   });
 
@@ -104,6 +130,7 @@ test('the library Electron needs is asked of the linker, and "no ldconfig" is no
   assert.equal(noLib.ok, false);
   assert.equal(noLib.reason, 'appindicator-library');
   assert.ok(noLib.fix, 'a library install is what fixes this one');
+  assert.deepEqual(noLib.fix?.packages, ['libayatana-appindicator3-1'], 'the library, and only the library');
 
   // A host without ldconfig cannot be asked, and an app that nags a working desktop is
   // the same defect as one that hides silently: unknown is not missing.
@@ -117,10 +144,29 @@ test('the library Electron needs is asked of the linker, and "no ldconfig" is no
 });
 
 test('a machine whose package manager we do not know is told, and is offered nothing to press', () => {
+  const unknown = traySupport(probe({ osRelease: () => ALPINE, extensions: () => 'ubuntu-dock@ubuntu.com\n' }));
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.fix, undefined, 'a package name we guessed is worse than a sentence');
+  assert.match(unknown.detail ?? '', /extension/);
+});
+
+test('Arch and openSUSE get the press their own repositories can honour', () => {
+  // Arch: both halves are in `extra`, so a GNOME session missing the extension is fixed
+  // with pacman rather than a sentence.
   const arch = traySupport(probe({ osRelease: () => ARCH, extensions: () => 'ubuntu-dock@ubuntu.com\n' }));
-  assert.equal(arch.ok, false);
-  assert.equal(arch.fix, undefined, 'a package name we guessed is worse than a sentence');
-  assert.match(arch.detail ?? '', /extension/);
+  assert.deepEqual(arch.fix, { manager: 'pacman', packages: ['gnome-shell-extension-appindicator'] });
+  const archLib = traySupport(probe({ osRelease: () => ARCH, libs: () => '/lib/x86_64-linux-gnu/libgtk-3.so.0\n' }));
+  assert.deepEqual(archLib.fix, { manager: 'pacman', packages: ['libayatana-appindicator'] });
+
+  // openSUSE: the library is packaged, the GNOME host extension is not — so the missing
+  // library is an install, and the missing extension is the sentence, with no button for a
+  // package that does not exist.
+  const suseLib = traySupport(probe({ osRelease: () => OPEN_SUSE, libs: () => '/lib/x86_64-linux-gnu/libgtk-3.so.0\n' }));
+  assert.deepEqual(suseLib.fix, { manager: 'zypper', packages: ['libayatana-appindicator3-1'] });
+  const suseHost = traySupport(probe({ osRelease: () => OPEN_SUSE, extensions: () => 'ubuntu-dock@ubuntu.com\n' }));
+  assert.equal(suseHost.ok, false);
+  assert.match(suseHost.detail ?? '', /extension/);
+  assert.equal(suseHost.fix, undefined);
 });
 
 test('the environment can pin the host, so the answer is testable and never guessed', () => {

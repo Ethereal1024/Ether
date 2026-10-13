@@ -57,27 +57,68 @@ const APPLET_LIB = /lib(?:ayatana-)?appindicator3\.so/;
  * Ubuntu, `appindicator` upstream — both spell the word). */
 const GNOME_HOST_EXT = /appindicator/i;
 
-/** The extension and library packages, per family, when the package *names* are ones
- * this project has actually seen work.  A family that is not here gets no button: a
- * package manager invocation that fails on a name we guessed is worse than a sentence. */
-const PACKAGES: Record<'debian' | 'fedora', string[]> = {
-  debian: ['gnome-shell-extension-appindicator', 'libayatana-appindicator3-1'],
-  fedora: ['gnome-shell-extension-appindicator', 'libappindicator-gtk3'],
+/** The families whose package manager this app knows how to drive, and the names that
+ * family gives each of the two things that can be missing.
+ *
+ * A name here is a name this project has checked against the distribution's *own*
+ * repositories — Arch's `extra` and openSUSE Tumbleweed's OSS repo, like `apt` and `dnf`
+ * before them — because a package manager invocation that fails on a guessed name is
+ * worse than a sentence: it costs a consent prompt and leaves the desktop no better off.
+ *
+ * `extension` is absent where the distribution does not package the GNOME host at all.
+ * openSUSE ships the client library and not the extension, so a GNOME session there gets
+ * the sentence instead of a button for a package that does not exist. */
+interface FamilyPackages {
+  manager: PackageManager;
+  /** The client library Electron `dlopen()`s. */
+  library: string;
+  /** The GNOME Shell extension that hosts the icon — where the distro has one. */
+  extension?: string;
+}
+
+export type DistroFamily = 'debian' | 'fedora' | 'arch' | 'suse';
+
+const FAMILIES: Record<DistroFamily, FamilyPackages> = {
+  debian: {
+    manager: 'apt-get',
+    library: 'libayatana-appindicator3-1',
+    extension: 'gnome-shell-extension-appindicator',
+  },
+  fedora: {
+    manager: 'dnf',
+    library: 'libappindicator-gtk3',
+    extension: 'gnome-shell-extension-appindicator',
+  },
+  arch: {
+    manager: 'pacman',
+    library: 'libayatana-appindicator',
+    extension: 'gnome-shell-extension-appindicator',
+  },
+  // openSUSE: `libayatana-appindicator3-1` is the library, and there is no extension
+  // package in the distribution's repositories — so `sni-host` has no install here.
+  suse: { manager: 'zypper', library: 'libayatana-appindicator3-1' },
 };
 
-const MANAGERS: Record<'debian' | 'fedora', PackageManager> = {
-  debian: 'apt-get',
-  fedora: 'dnf',
-};
-
-/** The two families this app installs packages on.  `ID` first, then `ID_LIKE`, which
- * is how a derivative (Linux Mint, Pop, Rocky) says what it is built on. */
-export function distroFamily(id: string, like = ''): 'debian' | 'fedora' | undefined {
+/** The families this app installs packages on.  `ID` first, then `ID_LIKE`, which is how
+ * a derivative (Linux Mint, Manjaro, GeckoLinux) says what it is built on — so the
+ * derivatives arrive through their base rather than through a list of every respin.
+ *
+ * An immutable-root openSUSE (`opensuse-microos`) reports `ID_LIKE="opensuse suse"` and so
+ * arrives here as the suse family; its root then refuses the install and the receipt says
+ * the change could not be made.  That is a machine this app cannot drive, but not a *name*
+ * this app guessed, and driving it (transactional-update, a reboot) is a different remedy
+ * rather than a different package. */
+export function distroFamily(id: string, like = ''): DistroFamily | undefined {
   const words = `${id} ${like}`.toLowerCase().split(/[\s,]+/).filter(Boolean);
-  const debian = ['debian', 'ubuntu', 'linuxmint', 'pop', 'elementary', 'zorin', 'kali', 'raspbian', 'neon'];
-  const fedora = ['fedora', 'rhel', 'centos', 'rocky', 'almalinux', 'ol'];
-  if (words.some((w) => debian.includes(w))) return 'debian';
-  if (words.some((w) => fedora.includes(w))) return 'fedora';
+  const families: Array<[DistroFamily, string[]]> = [
+    ['debian', ['debian', 'ubuntu', 'linuxmint', 'pop', 'elementary', 'zorin', 'kali', 'raspbian', 'neon']],
+    ['fedora', ['fedora', 'rhel', 'centos', 'rocky', 'almalinux', 'ol']],
+    ['arch', ['arch', 'archlinux', 'manjaro', 'endeavouros', 'cachyos', 'garuda']],
+    ['suse', ['suse', 'sles', 'sled', 'opensuse', 'opensuse-leap', 'opensuse-tumbleweed']],
+  ];
+  for (const [family, names] of families) {
+    if (words.some((w) => names.includes(w))) return family;
+  }
   return undefined;
 }
 
@@ -91,9 +132,20 @@ export function osReleaseIds(text: string): { id: string; like: string } {
   return { id: pick('ID'), like: pick('ID_LIKE') };
 }
 
-export function familyFix(family: 'debian' | 'fedora' | undefined): TrayFix | undefined {
+/**
+ * The one install that fixes `reason` on this family, or nothing at all.
+ *
+ * Reason-specific on purpose: `traySupport` asks one question at a time, and a press must
+ * install the thing that is actually missing rather than a bundle — a KDE session whose
+ * client library is absent has no use for a GNOME extension, and asking a package manager
+ * for one is exactly the guess this module refuses to make.
+ */
+export function familyFix(family: DistroFamily | undefined, reason: TrayReason): TrayFix | undefined {
   if (!family) return undefined;
-  return { manager: MANAGERS[family], packages: [...PACKAGES[family]] };
+  const found = FAMILIES[family];
+  const name = reason === 'sni-host' ? found.extension : found.library;
+  if (!name) return undefined;
+  return { manager: found.manager, packages: [name] };
 }
 
 export interface TraySupportDeps {
@@ -134,7 +186,7 @@ export function traySupport(o: TraySupportDeps): TraySupport {
     return {
       ok: false,
       reason: 'appindicator-library',
-      fix: familyFix(family),
+      fix: familyFix(family, 'appindicator-library'),
       detail: 'the app-indicator library is not installed',
     };
   }
@@ -145,7 +197,7 @@ export function traySupport(o: TraySupportDeps): TraySupport {
       return {
         ok: false,
         reason: 'sni-host',
-        fix: familyFix(family),
+        fix: familyFix(family, 'sni-host'),
         detail: 'this GNOME session has no app-indicator extension enabled',
       };
     }

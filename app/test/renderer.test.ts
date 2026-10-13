@@ -892,6 +892,9 @@ test('a dismissal is an answer, not a failure to report', async () => {
     ['refused', 'fixRefused'],
     ['failed', 'fixFailed'],
     ['noBroker', 'fixNoBroker'],
+    // The install that ran clean and did not take: the one outcome the window must not
+    // draw as Done, because the thing the press was for is still not true.
+    ['notBound', 'fixNotBound'],
   ] as const) {
     const h = harness({ fixKind: 'grantDeviceAccess', fixReason: reason });
     await h.settle();
