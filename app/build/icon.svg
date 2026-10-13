@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Ether's mark, drawn from app/tools/make-icons.py.  The palette is
+       style.css §1: plate = --bg, edge = --line, nodes = --text,
+       quiet legs = --muted, the carrying leg = --accent. -->
+  <rect x="56.32" y="56.32" width="911.36" height="911.36" rx="230.40" fill="#131313"/>
+  <rect x="59.14" y="59.14" width="905.73" height="905.73" rx="227.58" fill="none" stroke="#313131" stroke-width="5.63"/>
+  <circle cx="271.36" cy="512.00" r="68.00" fill="#F2F2F2"/>
+  <circle cx="752.64" cy="512.00" r="68.00" fill="#F2F2F2"/>
+  <rect x="369.96" y="505.00" width="65.24" height="14.00" rx="7.00" fill="#A4A4A4"/>
+  <rect x="588.80" y="505.00" width="65.24" height="14.00" rx="7.00" fill="#A4A4A4"/>
+  <rect x="435.20" y="499.00" width="153.60" height="26.00" rx="13.00" fill="#70CCEE"/>
+</svg>

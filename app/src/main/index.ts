@@ -15,7 +15,7 @@
 
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import path from 'node:path';
 import { Controller, type Status } from './controller.js';
 import { DeviceWatch } from './devwatch.js';
@@ -521,10 +521,29 @@ function resourcesDir(): string {
   return app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), 'resources');
 }
 
+/**
+ * The window's own icon.  `resources/appicon.png` is the same mark the launcher, the
+ * taskbar entry and the tray draw (one drawing, four renderings — see
+ * `tools/make-icons.py`), and it is carried in `extraResources`, so a package has it
+ * beside its adb.
+ *
+ * It matters most where there is no .desktop entry to name an icon: a dev run, or a
+ * tarball unpacked anywhere.  There the window, the taskbar button and the alt-tab
+ * entry are all this image, and without it they are Electron's own mark — the app
+ * looking like a different program is the one thing an icon must never do.
+ */
+function windowIcon(): Electron.NativeImage | undefined {
+  // Never fatal: an empty image means Electron draws its default, which is what
+  // happened before this file named an icon at all.
+  const icon = nativeImage.createFromPath(path.join(resourcesDir(), 'appicon.png'));
+  return icon.isEmpty() ? undefined : icon;
+}
+
 function createWindow(): BrowserWindow {
   const w = new BrowserWindow({
     width: WIN_W,
     height: WIN_H,
+    icon: windowIcon(),
     // Fixed, in content pixels, and nobody may drag it: a window whose size is a
     // constant cannot reflow its contents, and "drag the corner" on a one-button
     // app could only ever produce a clipped button or a slab of background.

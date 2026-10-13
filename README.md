@@ -1,5 +1,7 @@
 # Ether
 
+<img src="app/build/icon.png" width="88" alt="Ether's mark: a device and a PC node on the app's dark plate, joined by one lit leg">
+
 One USB cable, one click: a wired channel between stock Sunshine (PC) and stock
 Moonlight (tablet).  Sunshine and Moonlight are not patched — `adb` carries the
 TCP channels (HTTPS/HTTP/WebUI/RTSP) and a small relay carries the UDP channels
@@ -13,9 +15,12 @@ app/        the Electron app — this is the product
   src/renderer/ the single window (index.html, style.css, renderer.js)
   bin/cli.mjs   the headless CLI (`--up`, `--bench`, `--selftest`, …)
   test/         node:test suites, run against dist/
-  tools/        dev harness: ui-probe (layout), ui-live (real bridge), PNG readers
+  tools/        dev harness: ui-probe (layout), ui-live (real bridge), PNG readers,
+                and make-icons.py — one drawing -> every icon the app ships
   docs/         UI screenshots
-  resources/    tablet ELF, NOTICE, and adb (fetched at package time, not committed)
+  build/        the icon master: icon.svg, icon.png, icons/<N>x<N>.png (the Linux set)
+  resources/    the window and tray icons, tablet ELF, NOTICE, and adb (fetched at
+                package time, not committed)
 c-relay/    the C relay and its bench scripts
   udp2tcp.c     the relay itself (host + device roles)
   udp2tcp       host build, used by the CLI and the interop suite
@@ -23,7 +28,8 @@ c-relay/    the C relay and its bench scripts
   build.sh      rebuild both, then self-test
   wired-moonlight.sh  wire/verify/bench a session over the cable
   motion.py     moving-content load generator for encoder benches
-scripts/    release helpers: run-tests.sh, release.sh, make-icon.py (-> build/icon.png)
+scripts/    release helpers: run-tests.sh, release.sh, make-icon.py (a shim onto
+            app/tools/make-icons.py)
 .github/    workflows: ci.yml (push/PR tests), release.yml (tag -> three installers)
 LICENSE     MIT
 *.clc       local session logs — kept, never committed (see .gitignore)

@@ -56,6 +56,12 @@ linux:
   target:
     - AppImage
     - deb
+  # The icon *set*, not the single 1024 master: those files are installed into
+  # `hicolor/<N>x<N>/apps/ether.png`, and a desktop that asks for 24 or 48 px has
+  # nothing to draw if only a 1024 exists — it scales badly, or gives up and shows a
+  # generic mark.  `tools/make-icons.py` writes every size from the one drawing, and
+  # `build/icon.png` stays the master the .ico and the .icns are derived from.
+  icon: build/icons
   category: Utility
   synopsis: One-click wired (USB/adb) Moonlight tunnel
 

@@ -215,6 +215,9 @@ body {
    part of the instrument rather than as a title over it. 15px inside a 26px bar, so
    the title bar's height is the chip's and never this. */
 .brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
   margin: 0;
   font-family: var(--font-data);
   font-size: var(--fs-title);
@@ -222,6 +225,24 @@ body {
   line-height: 1.2;
   letter-spacing: 0.16em;
   text-transform: uppercase;
+}
+
+/* The mark beside the name, at the size this bar can carry it: the app icon's two
+   nodes and its lit leg — the same drawing as the taskbar icon and the tray, so the
+   window and its own icon cannot disagree about what the app looks like.  15px inside
+   the 18px line the name sets, so the bar is exactly as tall as it was. */
+.mark {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: var(--text);
+}
+
+.mark-lit {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.6;
+  stroke-linecap: round;
 }
 
 /* The link in one word.  A chip and not a sentence: it is read at a glance while

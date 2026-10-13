@@ -14,7 +14,20 @@
          channel names — every label is filled in from messages.ts by renderer.js. -->
     <div id="app">
       <header class="appbar">
-        <h1 class="brand">Ether</h1>
+        <!-- The app's mark, drawn here rather than loaded: the page runs under
+             `default-src 'none'`, so an image file could not be fetched anyway, and
+             an inline SVG costs no request and scales with the zoom chords.  It is
+             the app icon's own drawing — two nodes, one lit leg — at the one detail
+             level 15px affords: the quiet legs of the large mark would be hairlines
+             here, and a mark nobody can see is decoration. -->
+        <h1 class="brand">
+          <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="4.6" cy="12" r="3.2" />
+            <circle cx="19.4" cy="12" r="3.2" />
+            <path class="mark-lit" d="M8.4 12h7.2" />
+          </svg>
+          Ether
+        </h1>
         <!-- The one live region for the link: one word, announced once.  The
              sentence further down is not a second region — it says the same thing
              at more length and is read when the user reads it. -->
