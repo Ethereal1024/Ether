@@ -170,7 +170,10 @@ test('an app that starts before the tablet waits, then dials by itself', { skip:
     assert.ok(await waitFor(() => dials > 0), `no dial without a press: ${log.join('\n')}`);
     assert.equal(dials, 1, 'exactly one dial');
     assert.equal(atDial?.device?.state, 'device', 'the dial must be the one with a usable device behind it');
-    assert.equal(attempt.pending, false, 'the attempt is over once it dialled');
+    // Over when the dial *answered*, not the moment it was taken: the wait holds while the
+    // link is being raised (that is what the button reads as "working…"), so `dials` going
+    // up is the dial starting, and `pending` is what says it came back.
+    assert.ok(await waitFor(() => !attempt.pending), `the attempt is over once its dial answered: ${log.join('\n')}`);
     assert.ok(
       log.includes('[app] auto-connect: the device is ready, starting the wired link'),
       `the ready line must be logged: ${log.join('\n')}`,
@@ -289,8 +292,9 @@ test('the adb server pushing the device list is what dials, with no tick in sigh
     );
 
     // Over means detached: the attempt does not hold a socket to the adb server open for
-    // the rest of the session.
-    assert.equal(detaches, 1, 'the stream is given back when there is nothing left to wait for');
+    // the rest of the session.  When the dial answers and not when it is taken — the very
+    // same timing the first test asserts on `pending`.
+    assert.ok(await waitFor(() => detaches === 1), `the stream is given back when there is nothing left to wait for: ${log.join('\n')}`);
   } finally {
     await giveSunshineBack();
     await c?.down().catch(() => undefined);
@@ -396,10 +400,112 @@ test('a press that could not dial leaves the wait standing, and the tablet still
 
     assert.ok(await waitFor(() => dials > 0), `the wait must survive the press: ${log.join('\n')}`);
     assert.equal(dials, 1, 'exactly one dial, and it is the launch\u2019s own');
-    assert.equal(attempt.pending, false, 'the attempt is over once it dialled');
+    assert.ok(await waitFor(() => !attempt.pending), `the attempt is over once its dial answered: ${log.join('\n')}`);
     assert.ok(
       log.includes('[app] auto-connect: the device is ready, starting the wired link'),
       `the ready line must be logged: ${log.join('\n')}`,
+    );
+  } finally {
+    await giveSunshineBack();
+    await c?.down().catch(() => undefined);
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the app\u2019s own dial that raised nothing keeps the wait, and the tablet is dialled for again', { skip: posixOnly }, async () => {
+  // The launch this switch actually promises, with the one thing that used to kill it: the
+  // machine was ready *for a moment*.  The probe saw a usable device, the launch's dial
+  // went out on its own — and by the time it asked the bus again, the device was not on the
+  // list (a cable that blinked, a tablet that rebooted, adb answering a fresh list).  The
+  // refusal is `noDevice`: a sentence about a moment, not about the switch.
+  //
+  // Before this fix the launch's one automatic dial was spent right there: the tunnel kept
+  // `error`, so the card showed an error nobody had pressed anything for, `shouldAutoConnect`
+  // (which dials from `idle` only) could never fire again, and the button went back to
+  // inviting a press the switch was supposed to make unnecessary.  So what is asserted here
+  // is the whole of the user's expectation: the card is the bus's own answer, the wait is
+  // still standing, and the app dials by itself the moment the device is back.
+  if (existsSync(stub)) chmodSync(stub, 0o755);
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ether-autoconnect-owndial-'));
+  writeFileSync(path.join(dir, 'adb-reverses'), '');
+
+  const saved = new Map(KNOBS.map((k) => [k, process.env[k]]));
+  process.env.ADB = stub;
+  process.env.FAKE_ADB_MODE = 'ok'; // the tablet is there and allowed: the launch dials
+  process.env.FAKE_ADB_STATE = path.join(dir, 'adb-reverses');
+  process.env.FAKE_ADB_BENCH = BENCH;
+  delete process.env.FAKE_ADB_FULL;
+
+  const log: string[] = [];
+  let dials = 0;
+  let c: Controller | undefined;
+  const giveSunshineBack = await fakeSunshine(dir);
+  try {
+    c = await Controller.create({
+      dataDir: dir,
+      resourcesDir: path.join(appRoot, 'resources'),
+      skipReap: true,
+      log: (l) => log.push(l),
+    });
+
+    /** `index.ts`'s `startLink()`: exactly what its `dial` now runs. */
+    const startLink = async (): Promise<Status> => {
+      await c?.ensureAdb().catch(() => undefined);
+      await c?.up();
+      return (await c?.resync()) as Status;
+    };
+
+    const attempt = new AutoConnectAttempt({
+      settings: () => ON,
+      refresh: async () => {
+        await c?.refresh();
+      },
+      dial: async () => {
+        dials += 1;
+        // The device disappears between the probe and the dial: the dial is taken, and it
+        // is the bus that refuses it.  Second time round the cable is back.
+        if (dials === 1) process.env.FAKE_ADB_MODE = 'none';
+        return startLink();
+      },
+      provision: async () => {
+        await c?.ensureAdb();
+      },
+      log: (l) => log.push(l),
+      intervalMs: 25,
+      provisionEveryMs: 60_000,
+      redialMs: 150,
+    });
+    c.onChange((s) => attempt.step(s));
+
+    attempt.arm();
+    attempt.step(c.status()); // the push at the end of the launch block
+
+    // The launch's own dial, with no press anywhere.
+    assert.ok(await waitFor(() => dials === 1), `the launch must dial by itself: ${log.join('\n')}`);
+    await sleep(150);
+    assert.equal(attempt.pending, true, 'a refusal the bus says again is not an answer');
+
+    // The card is the bus, not a memory of the failed dial: the sentence is the same one
+    // the probe derives, in the state `shouldAutoConnect` can dial from again.
+    const card = c.status();
+    assert.equal(card.state, 'idle', `the failed dial must not stick: ${card.message}`);
+    assert.equal(card.messageKey, 'noDevice');
+    assert.equal(card.device, undefined, 'and the row is the bus\u2019s answer too, not the lost device');
+
+    // The tablet answers again.  Nothing is pressed.
+    process.env.FAKE_ADB_MODE = 'ok';
+    process.env.FAKE_ADB_FULL = '1';
+    assert.ok(await waitFor(() => dials === 2), `the wait must dial again: ${log.join('\n')}`);
+    await sleep(150);
+    assert.equal(attempt.pending, false, 'the second dial is the answer, however it ends');
+    assert.equal(
+      log.filter((l) => l === '[app] auto-connect: the device is ready, starting the wired link').length,
+      2,
+      `one ready line per dial: ${log.join('\n')}`,
     );
   } finally {
     await giveSunshineBack();

@@ -647,7 +647,12 @@ function buildAutoConnectAttempt(): AutoConnectAttempt {
       await controller?.refresh();
     },
     dial: async () => {
-      await controller?.up();
+      const c = controller;
+      if (!c) return undefined;
+      // The press's own path (`startLink`): `up()`, and then the bus's own answer, so the
+      // app's own dial cannot leave a refusal on the card that the machine has moved on
+      // from — and so the status that decides the wait is the same one a press would see.
+      return startLink(c);
     },
     // adb itself may have been missing at the first look: a first run that raced the
     // network, or a machine where platform-tools was never installed next to ours.  The

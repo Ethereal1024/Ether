@@ -323,7 +323,11 @@ test('an armed attempt survives a launch with no device and dials the moment one
 
   // Now the tablet is booted and allowed.  One status is all it takes.
   attempt.step({ state: 'idle', device: { state: 'device' } });
-  assert.equal(attempt.pending, false, 'dialling ends the attempt');
+  // The wait ends on the dial's answer, not on its way out: a dial that is still in
+  // flight is still this attempt's business.
+  assert.equal(attempt.pending, true, 'the dial has not answered yet');
+  await sleep(10);
+  assert.equal(attempt.pending, false, 'a dial that says nothing dialled');
   assert.equal(dials, 1, 'exactly once');
   assert.deepEqual(log, ['[app] auto-connect: the device is ready, starting the wired link']);
 
@@ -333,6 +337,101 @@ test('an armed attempt survives a launch with no device and dials the moment one
   await sleep(30);
   assert.equal(refreshes, settled, 'the poll must stop once it dialled');
   assert.equal(dials, 1, 'and it must not dial again');
+});
+
+test('a dial that raised nothing keeps the wait, and the machine is asked again before a second one', async () => {
+  // The other half of the launch: the machine was ready *for a moment*.  The dial then
+  // refuses in the bus's own words ("no USB device" — the cable blinked, the tablet
+  // rebooted, adb answered a fresh list that no longer had the device on it), and the
+  // switch has to survive that: the refusal is a sentence about a moment, and the app's
+  // one automatic dial must not be spent on it.  A switch that gives up here is the
+  // picture this feature was mis-read from — the card showing a refusal nobody asked for,
+  // the button back to "Start wired link", and the switch on but doing nothing.
+  const log: string[] = [];
+  const seen: Array<'ready' | 'refused' | 'says-its-own-news'> = [];
+  let dials = 0;
+  const attempt = new AutoConnectAttempt({
+    settings: () => ON,
+    refresh: async () => undefined,
+    dial: async () => {
+      dials += 1;
+      if (dials === 1) {
+        seen.push('ready');
+        // What `startLink` answers after a `noDevice` refusal: `up()` refused, then
+        // `resync()` asked the bus and the bus said "still nothing there".
+        return { state: 'idle', messageKey: 'noDevice' };
+      }
+      if (dials === 2) {
+        seen.push('refused');
+        // The second one is the link's own news (`NOT_DIALLED` does not hold it): that
+        // *is* an answer, and the wait is over.
+        return { state: 'error', messageKey: 'udpFail' };
+      }
+      seen.push('says-its-own-news');
+      return undefined;
+    },
+    log: (l) => log.push(l),
+    intervalMs: 20,
+    provisionEveryMs: 60_000,
+    redialMs: 400,
+  });
+
+  attempt.arm();
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  await sleep(20);
+  assert.deepEqual(seen, ['ready']);
+  assert.equal(attempt.pending, true, 'a refusal the bus says again is not an answer');
+  assert.equal(dials, 1);
+
+  // Ready again — the same picture the first dial was taken from.  Nothing may dial yet:
+  // a device that flaps under the probe must not fork the relay on every tick.
+  for (let i = 0; i < 4; i++) {
+    attempt.step({ state: 'idle', device: { state: 'device' } });
+    await sleep(20);
+  }
+  assert.equal(dials, 1, `the redial spacing must hold, saw ${dials}`);
+
+  // It is spacing, not a ban: once it has passed, one more ready status dials — no press,
+  // and no second launch.
+  await sleep(400);
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  await sleep(20);
+  assert.deepEqual(seen, ['ready', 'refused'], log.join('\n'));
+  assert.equal(dials, 2);
+  assert.equal(attempt.pending, false, 'the dial that said something of its own ended the wait');
+
+  const settled = dials;
+  await sleep(60);
+  assert.equal(dials, settled, 'and a link that refused for its own reasons is not dialled again');
+  assert.equal(log.length, 2, 'one ready line per dial, and nothing else');
+});
+
+test('a dial that throws is not the machine answering, so the wait survives it', async () => {
+  let dials = 0;
+  const attempt = new AutoConnectAttempt({
+    settings: () => ON,
+    refresh: async () => undefined,
+    dial: async () => {
+      dials += 1;
+      throw new Error('adb: no such file');
+    },
+    log: () => undefined,
+    intervalMs: 20,
+    provisionEveryMs: 60_000,
+    redialMs: 60,
+  });
+
+  attempt.arm();
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  await sleep(20);
+  assert.equal(attempt.pending, true, 'an exception is not an answer either');
+  assert.equal(dials, 1);
+  await sleep(60);
+  attempt.step({ state: 'idle', device: { state: 'device' } });
+  await sleep(20);
+  assert.equal(dials, 2, `the spacing is what bounds a broken dial, saw ${dials}`);
+  assert.equal(attempt.pending, true);
+  attempt.disarm();
 });
 
 test('a missing adb is looked for again while waiting, but not on every tick', async () => {
@@ -592,6 +691,7 @@ test('the bus speaking is a reason to ask, and the answer is still the only reas
 
   // The user taps Allow: another frame, another read — and this one is usable.
   t.attempt.step({ state: 'idle', device: { state: 'device' } });
+  await sleep(10); // the dial's own answer is what ends the wait (see the attempt)
   assert.equal(t.counts().dials, 1);
   assert.equal(t.attempt.pending, false);
   assert.deepEqual(t.log, ['[app] auto-connect: the device is ready, starting the wired link']);

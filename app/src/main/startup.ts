@@ -23,6 +23,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import type { MsgKey } from './messages.js';
 
 // ── the settings we own ─────────────────────────────────────────────────────
 
@@ -211,6 +212,8 @@ export function startupInstalled(dir: string): boolean {
 export interface AutoConnectStatus {
   state?: string;
   device?: { state?: string };
+  /** Which sentence the status carries — the dial's answer is read off it (see `NOT_DIALLED`). */
+  messageKey?: MsgKey;
 }
 
 /**
@@ -223,6 +226,30 @@ export interface AutoConnectStatus {
 export function shouldAutoConnect(settings: Settings, status: AutoConnectStatus): boolean {
   return settings.autoConnect === true && status.state === 'idle' && status.device?.state === 'device';
 }
+
+/**
+ * The refusals that never raised anything: the cable, a device that has not been allowed
+ * on it, the client on the far end, the service on this PC, adb itself.  Every one of them
+ * is a sentence about the machine that the next probe says again — which is what
+ * `Controller.resync()` is for, and the reason the keys a *dial* alone can find
+ * (`udpFail`, `abiUnsupported`, `elfNoExec`) are not in here: those are the link's own
+ * news, and the one thing a dial can say that is an answer to the switch that asked for it.
+ *
+ * It lives here rather than beside the controller because it is a fact about *this*
+ * decision: a status carrying one of these keys is "not yet", whatever raised it — a press
+ * (`resync`), or the app's own dial (`AutoConnectAttempt.dial`).
+ */
+export const NOT_DIALLED: ReadonlySet<MsgKey> = new Set<MsgKey>([
+  'noDevice',
+  'unauthorized',
+  'noPermissions',
+  'noPermissionsAfterRule',
+  'offline',
+  'noMoonlight',
+  'noSunshine',
+  'adbMissing',
+  'adbConflict',
+]);
 
 /** The verbs the window's button, the tray toggle and the remedy buttons send. */
 export type LinkVerb = 'start' | 'stop' | 'restart-adb' | 'fix';
@@ -276,8 +303,17 @@ export interface AutoConnectDeps {
   /** Ask the machine again.  The shell maps this to `controller.refresh()`; the status
    * push that ends it is what runs the one decision in `step()`. */
   refresh: () => Promise<void>;
-  /** Raise the link.  Called at most once per launch. */
-  dial: () => Promise<void>;
+  /**
+   * Raise the link, the way a press would: `up()`, and then the bus's own answer
+   * (`Controller.resync()`, which `index.ts`'s `startLink` is).  Called for every status
+   * that says the machine is ready — and never more often than `redialMs`.
+   *
+   * The status it *ends* in is what decides the wait, so a dial that raised nothing
+   * returns the refusal the machine just said (`NOT_DIALLED`) and the wait stands.  A
+   * shell that returns nothing is read as "it dialled": the wait is over, which is what
+   * this attempt assumed before there was anything to read.
+   */
+  dial: () => Promise<AutoConnectStatus | void>;
   /** Make sure adb itself is there, called again while waiting when the first look
    * found none (a first run that raced the network, a machine where adb was never
    * installed).  Optional, and expected to be free when adb is already found. */
@@ -301,6 +337,15 @@ export interface AutoConnectDeps {
    *  appearing, an adb server that moved to another socket, a watch that died without
    *  saying so. */
   safetyMs?: number;
+  /**
+   * How long the machine is left alone after a dial that raised nothing, before the same
+   * ready picture may dial again.  The refusal that keeps the wait (`NOT_DIALLED`) is the
+   * bus's answer about a *moment*, so a device that flaps between the probe and the dial
+   * would otherwise have the relay forked for it on every tick — and every one of those
+   * forks pushes the device-side program again.  Thirty seconds is the cadence this
+   * attempt already falls back to when the bus is pushing.
+   */
+  redialMs?: number;
   /** How often a missing adb may be looked for again, so a failed download is not
    * retried every tick. */
   provisionEveryMs?: number;
@@ -338,13 +383,18 @@ export class AutoConnectAttempt {
   private unwatch?: () => void;
   private busy = false;
   private lastProvision = 0;
+  /** A dial is in flight: a second status that says "ready" must not start another. */
+  private dialling = false;
+  private lastDial = 0;
   private readonly interval: number;
   private readonly safety: number;
+  private readonly redial: number;
   private readonly provisionEvery: number;
 
   constructor(private readonly deps: AutoConnectDeps) {
     this.interval = deps.intervalMs ?? 2000;
     this.safety = deps.safetyMs ?? 30_000;
+    this.redial = deps.redialMs ?? 30_000;
     this.provisionEvery = deps.provisionEveryMs ?? 30_000;
   }
 
@@ -354,6 +404,9 @@ export class AutoConnectAttempt {
     // The first look at the bus was the controller's own `refresh()`; a retry of a
     // *missing* adb is what this stamp spaces out.
     this.lastProvision = Date.now();
+    // A launch dials the moment the machine is ready; the spacing above is about a dial
+    // that raised nothing.
+    this.lastDial = 0;
   }
 
   /** Over: it dialled, the link was already there, or the user took over (the button,
@@ -376,10 +429,60 @@ export class AutoConnectAttempt {
       this.start();
       return;
     }
-    this.disarm();
-    if (decision === 'give-up') return;
+    if (decision === 'give-up') {
+      this.disarm();
+      return;
+    }
+    void this.dial();
+  }
+
+  /**
+   * The dial, and the only place the wait can end on the app's own initiative.
+   *
+   * It does *not* end the wait on its way out, the way it used to.  What ends the wait is
+   * the status the dial came back with, and only two of those are answers: a link that is
+   * there or on its way up, and a refusal that is the dial's own news (everything
+   * `NOT_DIALLED` is not — a udp check that failed, an ABI with no relay, a program the
+   * device will not run).  A refusal the machine will say again is the same "not yet" the
+   * switch exists for — the bus's answer about a moment, not about the switch — so the
+   * wait stands and the app dials again by itself when the machine is ready once more.
+   *
+   * That is the difference between a switch that works and one that quietly dies: without
+   * it, the launch's one automatic dial is spent the first time adb blinks, the card keeps
+   * the refusal as if the user had asked for it, and the button goes back to inviting a
+   * press the switch was supposed to make unnecessary.
+   */
+  private async dial(): Promise<void> {
+    if (this.dialling) return;
+    const now = Date.now();
+    if (now - this.lastDial < this.redial) return;
+    this.dialling = true;
+    this.lastDial = now;
     this.deps.log('[app] auto-connect: the device is ready, starting the wired link');
-    void this.deps.dial().catch((e) => this.deps.log(`[app] auto-connect failed: ${(e as Error).message}`));
+    try {
+      const after = await this.deps.dial();
+      if (!this.armed) return; // the user took over while it dialled
+      if (this.isAnswer(after)) this.disarm();
+    } catch (e) {
+      // Not the machine's answer but an exception: the wait stands, and `redialMs` is
+      // what keeps a broken dial from being repeated on every tick.
+      this.deps.log(`[app] auto-connect failed: ${(e as Error).message}`);
+    } finally {
+      this.dialling = false;
+    }
+  }
+
+  /**
+   * Whether the status a dial ended in is an answer to the switch: a link (the link *is*
+   * the answer, a second dial could not be what the user meant) or the dial's own news.
+   * The rest — idle, `noSunshine`, a device that vanished between the probe and the dial —
+   * is the machine saying "not yet", which is exactly what this attempt is for.
+   */
+  private isAnswer(s: AutoConnectStatus | void): boolean {
+    if (!s) return true; // a shell with nothing to say dialled for real
+    if (LINK_STATES.has(s.state ?? '')) return true;
+    if (s.state !== 'error') return false;
+    return s.messageKey === undefined || !NOT_DIALLED.has(s.messageKey);
   }
 
   /**

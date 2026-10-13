@@ -19,6 +19,7 @@ import {
   type SunshinePorts,
 } from './ports.js';
 import { reapAll, type ReapReport } from './reap.js';
+import { NOT_DIALLED } from './startup.js';
 import { Tunnel, channelNames, type TunnelState, type TunnelStatus, type UdpProbe } from './tunnel.js';
 
 /**
@@ -84,23 +85,12 @@ const EMPTY_STATS = { datagrams: 0, bytes: 0, dropped: 0, peers: 0 };
 const SUPPORTED_ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'];
 
 /**
- * The dial refusals that never raised anything: the cable, a device that has not been
+ * The dial refusals that never raised anything — the cable, a device that has not been
  * allowed on it, the client on the far end, the service on this PC, adb itself.  Every one
- * of them is a sentence about the machine that the next probe says again — which is what
- * `resync()` is for, and why the keys the dial alone can find (`udpFail`, `abiUnsupported`,
- * `elfNoExec`) are not in here: those are the link's own news and stay on the card.
+ * of them is a sentence about the machine that the next probe says again, which is what
+ * `resync()` is for.  The list lives in `startup.ts`, next to the decision that reads it
+ * for the app's own dial as well (`AutoConnectAttempt`).
  */
-const NOT_DIALLED: ReadonlySet<MsgKey> = new Set<MsgKey>([
-  'noDevice',
-  'unauthorized',
-  'noPermissions',
-  'noPermissionsAfterRule',
-  'offline',
-  'noMoonlight',
-  'noSunshine',
-  'adbMissing',
-  'adbConflict',
-]);
 
 export class Controller {
   readonly dataDir: string;
