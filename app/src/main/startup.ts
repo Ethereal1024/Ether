@@ -224,6 +224,25 @@ export function shouldAutoConnect(settings: Settings, status: AutoConnectStatus)
   return settings.autoConnect === true && status.state === 'idle' && status.device?.state === 'device';
 }
 
+/** The verbs the window's button, the tray toggle and the remedy buttons send. */
+export type LinkVerb = 'start' | 'stop' | 'restart-adb' | 'fix';
+
+/**
+ * Which of the user's verbs withdraws the launch's auto-connect request.
+ *
+ * Only a refusal does.  `stop` is the user saying "not this link, now", and an attempt
+ * that survived it would dial a link they just refused — so that one ends the wait.  Every
+ * other verb asks for the *same* thing the switch asks for, and the press that matters is
+ * the one that fails: with the cable still in the drawer, "Start wired link" answers "no USB
+ * device" — and if that press also cancelled the wait, the switch would be silently dead
+ * for the rest of the session.  The card would be back to the picture this whole feature
+ * was mis-read from: switch on, nothing armed, nothing waiting, nothing said.  A start that
+ * could not dial yet is not a change of mind.
+ */
+export function withdrawsAutoConnect(verb: LinkVerb): boolean {
+  return verb === 'stop';
+}
+
 /**
  * What an *armed* attempt does with a status that did not dial.
  *

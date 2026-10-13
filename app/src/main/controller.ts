@@ -83,6 +83,25 @@ const EMPTY_STATS = { datagrams: 0, bytes: 0, dropped: 0, peers: 0 };
 /** ABIs we ship a relay for; the directory name *is* the ABI string. */
 const SUPPORTED_ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'];
 
+/**
+ * The dial refusals that never raised anything: the cable, a device that has not been
+ * allowed on it, the client on the far end, the service on this PC, adb itself.  Every one
+ * of them is a sentence about the machine that the next probe says again — which is what
+ * `resync()` is for, and why the keys the dial alone can find (`udpFail`, `abiUnsupported`,
+ * `elfNoExec`) are not in here: those are the link's own news and stay on the card.
+ */
+const NOT_DIALLED: ReadonlySet<MsgKey> = new Set<MsgKey>([
+  'noDevice',
+  'unauthorized',
+  'noPermissions',
+  'noPermissionsAfterRule',
+  'offline',
+  'noMoonlight',
+  'noSunshine',
+  'adbMissing',
+  'adbConflict',
+]);
+
 export class Controller {
   readonly dataDir: string;
   readonly plat: Plat;
@@ -355,6 +374,26 @@ export class Controller {
     if (!this.tunnelReady()) return this.status();
     await this.tunnel.up(o);
     return this.refreshAfterTunnel();
+  }
+
+  /**
+   * After a dial that never raised anything, ask the machine instead of remembering the
+   * refusal — the window's rule, and the reason it is not in `up()` itself.
+   *
+   * `up()` has to answer with the refusal: `--up --json` reporting `error`/`noDevice` *is*
+   * the headless answer, and that process is about to exit with it.  A window stays open,
+   * and there the refusal outlives its cause: the cable arrives, the card goes on saying
+   * "No USB device" while the device row already shows it, and the launch's auto-connect
+   * cannot dial either — `idle` is exactly the state it waits for.  Every key in
+   * `NOT_DIALLED` is one the probe says again by itself, so the tunnel is put back to
+   * `idle` and the card comes from the bus, in the same words, as a fact about the machine
+   * rather than a memory of the press.
+   */
+  async resync(): Promise<Status> {
+    const s = this.status();
+    if (s.state !== 'error' || s.messageKey === undefined || !NOT_DIALLED.has(s.messageKey)) return s;
+    this.tunnel.reset();
+    return this.refresh();
   }
 
   async down(): Promise<Status> {

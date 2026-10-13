@@ -55,9 +55,11 @@ import {
   startupFields,
   startupInstalled,
   windowCloseAction,
+  withdrawsAutoConnect,
   writeSettings,
   DEFAULT_SETTINGS,
   type CloseAction,
+  type LinkVerb,
   type Settings,
 } from './startup.js';
 import { extractZip } from './zip.js';
@@ -99,6 +101,18 @@ let deviceWatch: DeviceWatch | undefined;
 /** The user took over, or the app is going down: no attempt of ours may follow it. */
 function disarmAutoConnect(): void {
   autoConnect?.disarm();
+}
+
+/**
+ * Every verb the user can run on a link — the window's button, the tray's toggle, the
+ * remedy buttons — passes through here, and `withdrawsAutoConnect` is the whole decision:
+ * a refusal (Stop) ends the wait, a request (a start that failed because the device is not
+ * there yet) leaves it standing.  Anything else would let one press of the button the card
+ * invites cancel the switch without a word.
+ */
+function onUserVerb(verb: LinkVerb): void {
+  lastFix = undefined;
+  if (withdrawsAutoConnect(verb)) disarmAutoConnect();
 }
 
 // ── the tray, and the remedies the window can offer ─────────────────────────
@@ -356,12 +370,16 @@ function showWindow(): void {
 function onTrayAction(a: TrayAction): void {
   if (a === 'show') return showWindow();
   if (a === 'quit') return app.quit();
-  disarmAutoConnect();
-  lastFix = undefined;
   const c = controller;
   if (!c) return;
   const up = lastStatus?.state === 'up' || lastStatus?.state === 'degraded';
-  void (up ? c.down() : c.up()).catch((e) => process.stdout.write(`[tray] ${a} failed: ${(e as Error).message}\n`));
+  // The tray's toggle is the window's button wearing an icon, so it obeys the same rule:
+  // stopping is a refusal and ends the wait, starting is a request and does not — and a
+  // start runs `startLink`, so the icon cannot raise a link the window would not.
+  onUserVerb(up ? 'stop' : 'start');
+  void (up ? c.down() : startLink(c)).catch((e) =>
+    process.stdout.write(`[tray] ${a} failed: ${(e as Error).message}\n`),
+  );
 }
 
 /** Which device the driver probe was last answered for, so a new cable is a new
@@ -687,6 +705,22 @@ function pushStarting(): void {
   else push(startingStatus());
 }
 
+/**
+ * Both doors to "start" — the window's button and the tray's toggle — run this, so the two
+ * cannot drift.  adb gets its second chance here: a first launch at login can beat the
+ * network the download needs, and the app ships adb of its own, so a Connect that answers
+ * "install platform-tools" and stops there is the manual step this app exists to remove (a
+ * no-op whenever adb is already there).  Then the dial, and then the bus's own answer: a
+ * start that failed for a reason the machine can say again (no cable yet, no permission,
+ * no client, no service) leaves the card where the probe puts it, not in the refusal — see
+ * `Controller.resync`.
+ */
+async function startLink(c: Controller): Promise<Status> {
+  await c.ensureAdb().catch(() => undefined);
+  await c.up();
+  return c.resync();
+}
+
 function registerIpc(): void {
   ipcMain.handle('state', async () => {
     const c = await requireController();
@@ -695,27 +729,18 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('start', async () => {
-    disarmAutoConnect(); // the user took over: no attempt of ours may follow it
-    lastFix = undefined;
-    const c = await requireController();
-    // The button is the second chance for adb itself.  A first launch at login can beat
-    // the network the download needs, and the app ships adb of its own — so pressing
-    // Connect looks for it again instead of answering "install platform-tools" and
-    // stopping there.  A no-op whenever adb is already there.
-    await c.ensureAdb().catch(() => undefined);
-    return payload(await c.up());
+    onUserVerb('start'); // a request, not a refusal: a failed press must not end the wait
+    return payload(await startLink(await requireController()));
   });
 
   ipcMain.handle('stop', async () => {
-    disarmAutoConnect();
-    lastFix = undefined;
+    onUserVerb('stop'); // the one refusal: no attempt of ours may follow it
     const c = await requireController();
     return payload(await c.down());
   });
 
   ipcMain.handle('restart-adb', async () => {
-    disarmAutoConnect();
-    lastFix = undefined;
+    onUserVerb('restart-adb'); // a remedy, not a refusal
     const c = await requireController();
     return payload(await c.restartAdb());
   });
@@ -732,7 +757,7 @@ function registerIpc(): void {
    * with the outcome in `fixResult` — a refusal is drawn as a sentence, not thrown.
    */
   ipcMain.handle('fix', async () => {
-    disarmAutoConnect();
+    onUserVerb('fix'); // the app carrying out a remedy is still the same request
     const pressed = await runFix();
     if (pressed) lastFix = pressed;
     return payload(lastStatus ?? controller?.status() ?? startingStatus());

@@ -32,8 +32,10 @@ import {
   startupFields,
   startupInstalled,
   windowCloseAction,
+  withdrawsAutoConnect,
   writeSettings,
   type AutoConnectStatus,
+  type LinkVerb,
   type Settings,
 } from '../src/main/startup.js';
 
@@ -231,6 +233,17 @@ test('auto-connect dials once, and only into an idle link with a usable device',
   }
   assert.equal(shouldAutoConnect(on, { state: 'idle' }), false);
   assert.equal(shouldAutoConnect(on, {}), false);
+});
+
+test('only a refusal withdraws the launch-s auto-connect request', () => {
+  // The whole rule, verb by verb: everything but Stop asks for the same thing the switch
+  // asks for, so a press that could not dial yet ("no USB device") must leave the wait
+  // standing — otherwise the button the card invites would kill the switch in silence.
+  const asks: LinkVerb[] = ['start', 'restart-adb', 'fix'];
+  for (const verb of asks) {
+    assert.equal(withdrawsAutoConnect(verb), false, verb);
+  }
+  assert.equal(withdrawsAutoConnect('stop'), true);
 });
 
 test('the armed attempt waits through the launch order and gives up only on a link that is already there', () => {
