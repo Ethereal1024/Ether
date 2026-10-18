@@ -57,10 +57,13 @@ linux:
     - AppImage
     - deb
   # The icon *set*, not the single 1024 master: those files are installed into
-  # `hicolor/<N>x<N>/apps/ether.png`, and a desktop that asks for 24 or 48 px has
-  # nothing to draw if only a 1024 exists — it scales badly, or gives up and shows a
-  # generic mark.  `tools/make-icons.py` writes every size from the one drawing, and
-  # `build/icon.png` stays the master the .ico and the .icns are derived from.
+  # `hicolor/<N>x<N>/apps/ether.png`, and a theme only reads the directories its own
+  # `index.theme` lists — hicolor's stops at `512x512/apps`.  A lone 1024 file is
+  # therefore not a low-quality icon but an invisible one: `ether` resolves at *no*
+  # size, and the launcher, the dock and the alt-tab entry all draw the generic
+  # placeholder while a perfectly good icon sits on disk.  That was the shipped 0.2.5.
+  # `tools/make-icons.py` writes every size from the one drawing, and `build/icon.png`
+  # stays the master the .ico and the .icns are derived from.
   icon: build/icons
   category: Utility
   synopsis: One-click wired (USB/adb) Moonlight tunnel

@@ -528,9 +528,16 @@ function resourcesDir(): string {
  * beside its adb.
  *
  * It matters most where there is no .desktop entry to name an icon: a dev run, or a
- * tarball unpacked anywhere.  There the window, the taskbar button and the alt-tab
- * entry are all this image, and without it they are Electron's own mark — the app
- * looking like a different program is the one thing an icon must never do.
+ * tarball unpacked anywhere.  There the window and the alt-tab entry are this image,
+ * and without it they are Electron's own mark — the app looking like a different
+ * program is the one thing an icon must never do.
+ *
+ * On a Linux desktop it is a second route rather than the only one: GNOME resolves a
+ * window through its .desktop entry and the icon *theme*, which is why the size set the
+ * package installs (`electron-builder.yml` → `build/icons`) is what a dock actually
+ * draws — and why one 1024 px file could be invisible there.  Electron 33 on this X11
+ * host writes an empty `_NET_WM_ICON` even with this set, so neither route may be
+ * assumed to cover the other.
  */
 function windowIcon(): Electron.NativeImage | undefined {
   // Never fatal: an empty image means Electron draws its default, which is what

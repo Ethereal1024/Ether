@@ -8,7 +8,11 @@
 //     a release whose master is missing, and this file pins the rest of the set);
 //   * an icon that exists at exactly one size.  A panel that asks the theme for 24px
 //     finds nothing to draw and scales a 1024 down badly, or gives up on the lookup
-//     entirely — and a taskbar is where this app is looked at most of the time.
+//     entirely — and a taskbar is where this app is looked at most of the time.  It is
+//     worse than "scaled badly": a theme only reads the directories its own
+//     `index.theme` lists, and `hicolor`'s stops at `512x512/apps`.  A lone file in
+//     `hicolor/1024x1024/apps` is not a bad icon, it is an *invisible* one — the theme
+//     answers "no such icon" at every size, and the desktop draws its placeholder.
 //
 // The third thing here is not about size.  The mark is drawn in the window's own
 // palette (style.css §1), and two of these tests re-derive that palette from the CSS
@@ -217,7 +221,7 @@ test('the master is big enough to derive the .ico and the .icns from', () => {
   assert.equal(rgbaAt(icon, 0, 0)[3], 0, 'the plate has to be round: a square icon ignores the desktop');
 });
 
-test('Linux is handed a set of sizes, not one 1024px file', () => {
+test('Linux is handed the sizes a theme indexes, not one 1024px file', () => {
   const dir = path.join(buildDir, 'icons');
   const names = readdirSync(dir).sort();
   assert.ok(names.length >= 5, `build/icons carries ${names.length} files`);
@@ -247,9 +251,24 @@ test('Linux is handed a set of sizes, not one 1024px file', () => {
     );
   }
 
+  // The set has to contain the sizes `hicolor` actually indexes.  This is the failure
+  // that was seen on a real install rather than reasoned about: hicolor-icon-theme's
+  // `index.theme` lists its directories only up to `512x512/apps`, so the single
+  // `hicolor/1024x1024/apps/ether.png` a package used to install was never read —
+  // `gtk_icon_theme_lookup_icon('ether', 48)` returned NULL at *every* size, and the
+  // launcher, the dock and the alt-tab entry all drew the generic placeholder while a
+  // good icon sat on disk.  1024 stays in the directory (Windows and macOS derive from
+  // the master) but it cannot be the one size Linux is given.
+  for (const size of [16, 24, 32, 48, 64, 128, 256, 512]) {
+    assert.ok(
+      names.includes(`${size}x${size}.png`),
+      `build/icons has no ${size}px file, and hicolor only reads the directories its index lists`,
+    );
+  }
+
   // The directory is only worth having if the packager is told to read it.
   const yml = readFileSync(path.join(appRoot, 'electron-builder.yml'), 'utf8');
-  assert.match(yml, /^\s*icon:\s*build\/icons\s*$/m, 'the deb installs one 1024px icon without this');
+  assert.match(yml, /^\s*icon:\s*build\/icons\s*$/m, 'one file, in a size directory the theme does not index');
 });
 
 test('the window is handed an icon, and that file ships with it', () => {
