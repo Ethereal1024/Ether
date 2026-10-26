@@ -56,12 +56,13 @@ const MESSAGES: Record<MsgKey, string> = {
   // what failed and leaves the retry to the app's own polling and the Connect button.
   adbMissing: 'adb could not be started: neither the copy shipped with the app nor one on this machine works, and the download failed',
   adbConflict: 'A different adb server version is running; it must be restarted (other sessions will drop)',
-  // The one machine where the bundled copy is not the answer: Google publishes Linux
-  // platform-tools for x86_64 only, so an arm64 build ships no adb and can download none.
-  // The fix is the distribution's package, and it is a *package*, not a privileged
-  // command this app hands out — `test/escalation.test.ts` fails if a sentence starts
-  // naming one.
-  adbNeedsDistro: 'No adb for this machine: Google ships Linux platform-tools for x86_64 only. Install your distribution\'s adb package',
+  // The one machine where the bundled copy is not the answer: the app ships an aarch64
+  // adb, but that payload needs glibc 2.35 (Debian 12 / Ubuntu 22.04) or newer, and
+  // Google publishes Linux platform-tools for x86_64 only — so on an older arm64 system
+  // there is nothing to fall back to over the network.  The fix is the distribution's
+  // package, and it is a *package*, not a privileged command this app hands out —
+  // `test/escalation.test.ts` fails if a sentence starts naming one.
+  adbNeedsDistro: 'No adb can run here: the one the app ships needs glibc 2.35 or newer. Install your distribution\'s adb package',
   abiUnsupported: 'Device ABI {abi} is not supported',
   elfNoExec: 'The device-side program cannot run (maybe /data/local/tmp is mounted noexec)',
   ready: 'Wired channel is up',

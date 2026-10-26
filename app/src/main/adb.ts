@@ -1,10 +1,11 @@
 // adb.ts — find adb, or fetch our own copy; then parse what it says.
 //
 // Rules that shape this file (§3.2):
-//   * the app ships its own copy of platform-tools (`resources/platform-tools/<plat>/`,
-//     placed there by `bin/cli.mjs --fetch-adb` while packaging) and hands it to every
-//     child process — so no machine has to be told to install anything, and the first
-//     launch after a login needs no network;
+//   * the app ships its own copy of platform-tools (`resources/platform-tools/<payload>/`,
+//     placed there by `bin/cli.mjs --fetch-adb` while packaging; on Linux arm64 that is a
+//     distribution-built adb plus the libraries it loads, see `adb-arm64.ts`) and hands it
+//     to every child process — so no machine has to be told to install anything, and the
+//     first launch after a login needs no network;
 //   * whatever the user already has still wins over it: that keeps the user's own adb
 //     server and version in charge when there is one;
 //   * failing both, the download goes into the app's own data dir and is used only by our
@@ -19,12 +20,14 @@ import path from 'node:path';
 import { downloadToFile } from './download.js';
 import {
   adbExeName,
+  bundledAdbDir,
+  bundledAdbLibDir,
   bundledAdbPath,
   currentPlat,
   elfFitsHost,
   elfHeadFromFile,
   findAdb,
-  hostCanRunPlatformTools,
+  googleShipsPlatformTools,
   type Plat,
 } from './platform.js';
 import { extractZip } from './zip.js';
@@ -124,13 +127,44 @@ function platformToolsUrl(plat: Plat): string {
 }
 
 /**
- * Why there is nothing to hand this machine, in one sentence for the two places that have
- * to say it (`ensure` before it downloads, `fetchInto` before it packs): Google ships
- * Linux platform-tools for x86_64 only, so on another architecture both the download and
- * the bundled copy are dead ends, and the distribution's adb is the only one that runs.
+ * Why there is nothing to download for this machine, in one sentence for the two places
+ * that have to say it (`ensure` before it downloads, `fetchInto` before it packs): Google
+ * ships Linux platform-tools for x86_64 only, and the archive is the one thing a package
+ * cannot carry for another architecture.
  */
-function noPlatformToolsFor(plat: Plat): string {
-  return `no platform-tools build exists for ${plat} on ${process.arch}: Google publishes Linux platform-tools for x86_64 only, so install your distribution's adb`;
+function noPlatformToolsFor(plat: Plat, arch: string): string {
+  return `no platform-tools archive exists for ${plat} on ${arch}: Google publishes Linux platform-tools for x86_64 only, and an arm64 package carries a distribution-built adb instead`;
+}
+
+/**
+ * Why the copy we ship is not the one that runs, in one sentence.  It is a different
+ * failure from "there is no copy": the file is there, it is the right architecture, and it
+ * still cannot start — on arm64 that means a glibc older than the payload's floor, and the
+ * fix is the distribution's adb, which was built for that system.
+ */
+function bundledAdbDead(plat: Plat, arch: string): string {
+  return `the adb this build ships for ${plat} on ${arch} did not start on this machine (it needs glibc 2.35 or newer), so install your distribution's adb`;
+}
+
+/**
+ * The environment a bundled adb needs: one that points `LD_LIBRARY_PATH` at the libraries
+ * next to it, and nothing else.
+ *
+ * `undefined` for every other copy — Google's archives are a single file linked against
+ * nothing but the system libc, and an adb the *user* installed is never second-guessed,
+ * including its library search path.  The child and everything it forks (the adb *server*,
+ * which adb starts by exec'ing itself) inherit it, which is the whole reason it is set on
+ * the process rather than patched into the binary: no `patchelf`, no rewritten RUNPATH, and
+ * the file stays the byte-for-byte artifact whose SHA-256 is pinned.
+ */
+function payloadEnv(exe: string, o: { plat: Plat; resourcesDir?: string }): NodeJS.ProcessEnv | undefined {
+  if (o.plat !== 'linux' || !o.resourcesDir) return undefined;
+  const bundled = path.normalize(bundledAdbDir(o.resourcesDir, o.plat));
+  if (path.normalize(path.dirname(exe)) !== bundled) return undefined;
+  const lib = bundledAdbLibDir(o.resourcesDir, o.plat);
+  if (!lib) return undefined;
+  const prev = process.env.LD_LIBRARY_PATH;
+  return { ...process.env, LD_LIBRARY_PATH: prev ? `${lib}${path.delimiter}${prev}` : lib };
 }
 
 export class Adb {
@@ -139,31 +173,59 @@ export class Adb {
   /** True once a command's stderr admitted a mismatched adb server version. */
   conflict = false;
   private readonly opts: AdbOpts;
+  /** `LD_LIBRARY_PATH` for a bundled adb that carries its own libraries; else undefined. */
+  private readonly env: NodeJS.ProcessEnv | undefined;
 
   private constructor(opts: AdbOpts, exe: string, version: string) {
     this.opts = opts;
     this.exe = exe;
     this.version = version;
+    this.env = payloadEnv(exe, opts);
   }
 
   /** Five-step discovery; the last step downloads platform-tools into `dataDir`. */
   static async ensure(o: AdbOpts): Promise<Adb> {
     const found = findAdb(o.env, o.plat, o.resourcesDir) ?? (await Adb.bundled(o));
+    let shippedDead = false;
     if (found) {
-      const version = await Adb.readVersion(found).catch(() => 'unknown');
-      o.log(`[adb] using ${found} (version ${version})`);
-      return new Adb(o, found, version);
+      const version = await Adb.readVersion(found, payloadEnv(found, o)).catch(() => undefined);
+      if (version !== undefined) {
+        o.log(`[adb] using ${found} (version ${version})`);
+        return new Adb(o, found, version);
+      }
+      // A copy that cannot even print its version is not one we can drive.  An adb the
+      // *user* has is still theirs to keep — a broken one is their setup to fix, and the
+      // version probe already reported it.  Ours is ours to judge: it is either the wrong
+      // architecture (already filtered by `findAdb`) or a payload this system is too old
+      // to load, and the answer to both is "not this one".
+      if (!Adb.isBundled(o, found)) {
+        o.log(`[adb] using ${found} (version unknown)`);
+        return new Adb(o, found, 'unknown');
+      }
+      shippedDead = true;
+      o.log(`[adb] ${found} did not start on this machine; looking for one that will`);
     }
 
-    // Nothing on this machine and nothing we can fetch: on an architecture Google
-    // publishes no Linux platform-tools for, downloading would only spend a minute to
-    // fail at the last step.  Refuse with a reason the caller can turn into a sentence.
-    if (!hostCanRunPlatformTools(o.plat, process.arch)) throw new AdbError(noPlatformToolsFor(o.plat), 'arch');
+    // Nothing on this machine works, and no archive exists to fetch: on Linux arm64 the
+    // answer is the distribution's adb — a minute of downloading would only fail at the
+    // last step.  Refuse with a reason the caller can turn into a sentence.
+    if (!googleShipsPlatformTools(o.plat, process.arch)) {
+      throw new AdbError(
+        shippedDead ? bundledAdbDead(o.plat, process.arch) : noPlatformToolsFor(o.plat, process.arch),
+        'arch',
+      );
+    }
 
     o.log(`[adb] not found on this machine; downloading platform-tools into ${o.dataDir}`);
     const version = await Adb.downloadAndInstall(o);
     const exe = path.join(o.dataDir, 'platform-tools', adbExeName(o.plat));
     return new Adb(o, exe, version);
+  }
+
+  /** Is this executable the copy inside our own resources? */
+  private static isBundled(o: AdbOpts, exe: string): boolean {
+    if (!o.resourcesDir) return false;
+    return path.normalize(exe) === path.normalize(bundledAdbPath(o.resourcesDir, o.plat));
   }
 
   /**
@@ -207,14 +269,13 @@ export class Adb {
    * sqlite3 and the rest of platform-tools are not copied: this app never runs them, and
    * carrying them would multiply the size of every package for nothing.
    */
-  static async fetchInto(o: { plat: Plat; dir: string; log: (l: string) => void; force?: boolean }): Promise<string> {
+  static async fetchInto(o: { plat: Plat; arch?: string; dir: string; log: (l: string) => void; force?: boolean }): Promise<string> {
     // Packing for the machine we are on: refuse before the download, not after it.  The
-    // arm64 deb is built without this call at all (`npm run dist:linux:arm64`), so what
-    // this guards is the `--plat all` that would otherwise fetch x86_64 Linux binaries
-    // into an arm64 package and report success.
-    if (o.plat === currentPlat() && !hostCanRunPlatformTools(o.plat, process.arch)) {
-      throw new AdbError(noPlatformToolsFor(o.plat), 'arch');
-    }
+    // arm64 deb is built by a different call (`fetchArm64Adb`, from Debian's packages), so
+    // what this guards is the `--plat all` that would otherwise fetch x86_64 Linux
+    // binaries into an arm64 package and report success.
+    const arch = o.arch ?? process.arch;
+    if (!googleShipsPlatformTools(o.plat, arch)) throw new AdbError(noPlatformToolsFor(o.plat, arch), 'arch');
     const exe = adbExeName(o.plat);
     const target = path.join(o.dir, exe);
     if (!o.force) {
@@ -260,20 +321,20 @@ export class Adb {
     const st = await stat(target).catch(() => undefined);
     if (!st?.isFile()) throw new AdbError('platform-tools extracted without an adb binary', 'download');
 
-    if (o.plat === currentPlat()) {
-      // Proof that what we just put there runs — only on the platform that can run it; a
+    if (o.plat === currentPlat() && arch === process.arch) {
+      // Proof that what we just put there runs — only on the machine that can run it; a
       // cross-fetched binary is for another machine, and this one cannot vouch for it.
       const version = await Adb.readVersion(target);
       o.log(`[adb] ${target} (${st.size >> 20} MiB, version ${version})`);
     } else {
-      o.log(`[adb] ${target} (${st.size >> 20} MiB, for ${o.plat})`);
+      o.log(`[adb] ${target} (${st.size >> 20} MiB, for ${o.plat} ${arch})`);
     }
     return target;
   }
 
-  private static readVersion(exe: string): Promise<string> {
+  private static readVersion(exe: string, env?: NodeJS.ProcessEnv): Promise<string> {
     return new Promise((resolve, reject) => {
-      execFile(exe, ['version'], { timeout: 10_000 }, (err, stdout) => {
+      execFile(exe, ['version'], { timeout: 10_000, env }, (err, stdout) => {
         if (err) reject(err);
         else resolve(parseAdbVersion(String(stdout)));
       });
@@ -319,7 +380,7 @@ export class Adb {
       execFile(
         this.exe,
         this.args(extra),
-        { timeout: timeoutMs, maxBuffer: 8 << 20, encoding: 'utf8' },
+        { timeout: timeoutMs, maxBuffer: 8 << 20, encoding: 'utf8', env: this.env },
         (err, stdout, stderr) => {
           const err2 = err as (NodeJS.ErrnoException & { killed?: boolean }) | null;
           if (stderr && /doesn't match this client/.test(String(stderr))) {

@@ -49,7 +49,7 @@ function uniq(xs: string[]): string[] {
  *   4. ~/Library/Android/sdk/platform-tools
  *   5. %LOCALAPPDATA%\Android\Sdk\platform-tools
  *   6. /usr/lib/android-sdk/platform-tools
- *   7. our own copy, shipped with the app (`<resources>/platform-tools/<plat>/`)
+ *   7. our own copy, shipped with the app (`<resources>/platform-tools/<payload>/`)
  *
  * What the user already has is still asked first: a machine with a working setup keeps
  * its own adb server and version, and two clients of one server is the state the app
@@ -58,7 +58,12 @@ function uniq(xs: string[]): string[] {
  * login needs no network.  The download (step 8, in `Adb.ensure`) is the last resort it
  * always was.
  */
-export function adbCandidates(env: NodeJS.ProcessEnv, plat: Plat, resourcesDir?: string): string[] {
+export function adbCandidates(
+  env: NodeJS.ProcessEnv,
+  plat: Plat,
+  resourcesDir?: string,
+  arch: string = process.arch,
+): string[] {
   const exe = adbExeName(plat);
   const out: string[] = [];
 
@@ -83,22 +88,51 @@ export function adbCandidates(env: NodeJS.ProcessEnv, plat: Plat, resourcesDir?:
 
   out.push(path.join('/usr', 'lib', 'android-sdk', 'platform-tools', exe));
 
-  if (resourcesDir) out.push(bundledAdbPath(resourcesDir, plat));
+  if (resourcesDir) out.push(bundledAdbPath(resourcesDir, plat, arch));
 
   return uniq(out);
 }
 
 /**
- * Where our own copy of platform-tools lives: one directory per platform, so a package
+ * The directory name of the payload a package carries: `<resources>/platform-tools/<this>`.
+ *
+ * Google publishes one archive per platform — darwin's is universal, and Windows on ARM
+ * runs the x64 one — so the platform *is* the whole story, with one exception: Linux on
+ * arm64 carries a distribution-built adb with its own `lib/` next to it
+ * (`src/main/adb-arm64.ts`), and the two payloads must be able to sit side by side in a
+ * source tree that builds for both.
+ */
+export function bundledPlatformToolsDir(plat: Plat, arch: string = process.arch): string {
+  return plat === 'linux' && arch === 'arm64' ? 'linux-arm64' : plat;
+}
+
+/**
+ * Where our own copy of platform-tools lives: one directory per payload, so a package
  * carries only the adb it can run, and the path is the same in a source tree
  * (`app/resources/…`) and in a package (electron-builder copies `resources/` there).
  */
-export function bundledAdbDir(resourcesDir: string, plat: Plat): string {
-  return path.join(resourcesDir, 'platform-tools', plat);
+export function bundledAdbDir(resourcesDir: string, plat: Plat, arch: string = process.arch): string {
+  return path.join(resourcesDir, 'platform-tools', bundledPlatformToolsDir(plat, arch));
 }
 
-export function bundledAdbPath(resourcesDir: string, plat: Plat): string {
-  return path.join(bundledAdbDir(resourcesDir, plat), adbExeName(plat));
+export function bundledAdbPath(resourcesDir: string, plat: Plat, arch: string = process.arch): string {
+  return path.join(bundledAdbDir(resourcesDir, plat, arch), adbExeName(plat));
+}
+
+/**
+ * The shared libraries a bundled adb carries next to itself, if any: the aarch64 payload
+ * needs them (`LD_LIBRARY_PATH`), every other one is a single file Google links against
+ * nothing but the system libc.  `undefined` when there is no such directory, which is what
+ * tells a caller it has nothing to add to the environment.
+ */
+export function bundledAdbLibDir(resourcesDir: string, plat: Plat, arch: string = process.arch): string | undefined {
+  const dir = path.join(bundledAdbDir(resourcesDir, plat, arch), 'lib');
+  try {
+    if (!statSync(dir).isDirectory()) return undefined;
+  } catch {
+    return undefined;
+  }
+  return dir;
 }
 
 /**
@@ -153,11 +187,17 @@ export function elfHeadFromFile(p: string): Uint8Array | undefined {
 
 // ── can this machine run the platform-tools we would ship? ────────────────────
 //
-// Google publishes Linux platform-tools for x86_64 only: there is no aarch64 `adb` to
-// carry in an arm64 package, and a download would fail the same way.  So that package
-// ships no adb at all and names the distribution's instead (`messages.adbNeedsDistro`);
-// everywhere else the copy we ship is the one that runs — Windows on ARM emulates x64,
-// and the darwin archive is universal.
+// Two different questions, and mixing them up is how an arm64 package ends up carrying an
+// `adb` nobody can execute:
+//
+//   * `hostCanRunPlatformTools` — is there an adb we can *ship* for this host?  Linux x64
+//     carries Google's archive; Linux arm64 carries a distribution-built one
+//     (`src/main/adb-arm64.ts`, needs glibc 2.35 or newer, and the app probes it before it
+//     trusts it); Windows on ARM emulates x64, and the darwin archive is universal.
+//   * `googleShipsPlatformTools` — does `dl.google.com` have an archive for this host?  For
+//     Linux that is x86_64 only, so the *download* is still the x64 path alone.  On arm64
+//     a missing or unusable bundled copy cannot be repaired over the network, which is why
+//     that case ends in `messages.adbNeedsDistro` instead of a minute of downloading.
 
 /** ELF `e_machine` for a Node architecture, for the three hosts this project can meet. */
 export function elfMachineForArch(arch: string): number | undefined {
@@ -187,8 +227,14 @@ export function elfMachine(head: Uint8Array): number | undefined {
   return head[5] === 2 ? (lo << 8) | hi : (hi << 8) | lo; // EI_DATA 2 = big endian
 }
 
-/** Does Google publish a platform-tools build that a host of `plat`/`arch` can execute? */
+/** Is there an adb this project can ship for a host of `plat`/`arch`? */
 export function hostCanRunPlatformTools(plat: Plat, arch: string): boolean {
+  if (plat !== 'linux') return true;
+  return arch === 'x64' || arch === 'arm64';
+}
+
+/** Does dl.google.com publish an archive for a host of `plat`/`arch`? (Linux: x86_64 only.) */
+export function googleShipsPlatformTools(plat: Plat, arch: string): boolean {
   if (plat !== 'linux') return true;
   return arch === 'x64';
 }

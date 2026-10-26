@@ -6,11 +6,12 @@
 #   dmg            : macOS arm64    (macos-latest)
 #   NSIS .exe      : Windows x64    (windows-latest)
 #
-# The arm64 deb is the one package that ships *no* adb: Google publishes Linux
-# platform-tools for x86_64 only, so it Recommends the distribution's instead.  It
-# is packed on the same x64 runner (nothing here is native code), and the job that
-# does it asserts the three claims a deb makes as text — Architecture, Recommends,
-# and the absence of `platform-tools/`.
+# The arm64 deb is the one package whose adb does not come from Google: Google
+# publishes Linux platform-tools for x86_64 only, so the aarch64 adb is assembled
+# at package time from pinned Debian/Ubuntu .deb files (src/main/adb-arm64.ts).
+# It is packed on the same x64 runner (nothing else in it is native code), and the
+# job asserts the claims a deb makes as text — Architecture, Recommends, and the
+# aarch64 payload itself.
 #
 # All four are UNSIGNED — this project has no Developer ID and no Authenticode
 # certificate, and saying so here is the point: a signed-looking release that is
@@ -147,18 +148,21 @@ jobs:
           body: |
             Unsigned builds. macOS: first launch is blocked by Gatekeeper — `xattr -cr /Applications/Ether.app`.
             Windows: SmartScreen warns — More info -> Run anyway (the installer never asks for admin).
-            Linux arm64: the `arm64.deb` carries no adb — Google publishes Linux platform-tools for x86_64 only — so install your distribution's `adb` package first.
+            Linux arm64: the `arm64.deb` carries its own aarch64 `adb` (needs glibc 2.35 or newer); on an older system, install your distribution's `adb` package.
 
-  # The arm64 deb. Packed on an x64 runner because nothing in it is native code — the
+  # The arm64 deb. Packed on an x64 runner because nothing else in it is native code — the
   # tablet-side relay is already aarch64 and the host relay is TypeScript — so the only
-  # architecture-dependent thing left is the *adb*, and that is the difference this job
-  # exists to prove:
+  # architecture-dependent thing is the *adb*, and that is the difference this job exists to
+  # prove:
   #
   #   * Architecture: arm64
-  #   * Recommends: adb (the distribution's — Google publishes Linux platform-tools for
-  #     x86_64 only, so there is none to bundle and none to download)
-  #   * no resources/platform-tools/ at all: an x86_64 adb on an arm64 machine is a file
-  #     that exists and cannot run, which is exactly the state this package avoids
+  #   * Recommends: adb (the distribution's, for a machine whose glibc is older than 2.35:
+  #     the payload then cannot start, and there is no Google archive to fall back to)
+  #   * the payload is there: resources/platform-tools/linux-arm64/adb, an aarch64 ELF, with
+  #     its libraries next to it — so arm64 behaves like every other platform and asks the
+  #     machine to install nothing
+  #   * and no platform-tools/linux/: that is Google's x86_64 copy, and a package that
+  #     carried it would ship a file that exists and cannot run
   #
   # It `needs: linux` because that job creates the release; attaching to a release that
   # does not exist yet is a 422, not a race worth having.
@@ -178,15 +182,16 @@ jobs:
         working-directory: app
         run: npm ci
 
-      - name: Build the arm64 deb (no bundled adb)
+      - name: Build the arm64 deb (with its own aarch64 adb)
         working-directory: app
         run: npm run dist:linux:arm64
 
       # A deb states its architecture, its recommendations and its file list as text, so
-      # all three are read here without running anything.  The icon assertion is not
-      # decoration: a missing icon set is the silent failure of 0.2.5, where every size
-      # the theme indexes was absent and the launcher drew a placeholder.
-      - name: The deb says arm64, recommends the distro's adb, and carries no adb
+      # those are read here without running anything; the one thing that needs the bytes is
+      # the aarch64 header, and `dpkg-deb -x` is how it is read.  The icon assertion is not
+      # decoration either: a missing icon set is the silent failure of 0.2.5, where every
+      # size the theme indexes was absent and the launcher drew a placeholder.
+      - name: The deb says arm64, recommends the distro's adb, and carries the aarch64 one
         run: |
           set -euo pipefail
           deb="$(ls app/release/*_arm64.deb)" || { echo "::error::no arm64 deb was produced"; exit 1; }
@@ -203,8 +208,23 @@ jobs:
           # went red ("the icon set is missing") for a package that had all nine sizes:
           # the log above it said `tar: stdout: write error`.
           listing="$(dpkg-deb -c "$deb")"
-          if grep -q 'platform-tools' <<< "$listing"; then
-            echo "::error::the arm64 package carries platform-tools; no copy of it can run there"
+          payload="platform-tools/linux-arm64"
+          grep -q "$payload/adb" <<< "$listing" || {
+            echo "::error::the arm64 package carries no aarch64 adb — arm64 would need the machine to install one"
+            grep platform-tools <<< "$listing" || echo "(no platform-tools entries at all)"
+            exit 1
+          }
+          libs="$(grep -c "$payload/lib/" <<< "$listing" || true)"
+          echo "== payload: adb + $libs libraries"
+          [ "$libs" -ge 15 ] || { echo "::error::only $libs libraries shipped; the payload is incomplete"; exit 1; }
+          for so in libcrypto.so.0 libprotobuf.so.32 libstdc++.so.6 libusb-1.0.so.0 libz.so.1; do
+            grep -q "$payload/lib/$so" <<< "$listing" || { echo "::error::$so is missing from the payload"; exit 1; }
+          done
+          # Google's x86_64 copy must not have ridden along: 11 MiB of a binary that cannot
+          # execute on the machine installing it.
+          if grep -q 'platform-tools/linux/' <<< "$listing"; then
+            echo "::error::the arm64 package also carries the x86_64 platform-tools"
+            grep 'platform-tools/linux/' <<< "$listing"
             exit 1
           fi
           grep -q 'hicolor/256x256/apps/ether' <<< "$listing" || {
@@ -212,6 +232,18 @@ jobs:
             grep hicolor <<< "$listing" || echo "(no hicolor entries at all)"
             exit 1
           }
+          # And the bytes are what the name promises: e_machine at offset 18 of an ELF64
+          # header, 0xb7 little-endian, i.e. EM_AARCH64.  Extracted to a directory rather
+          # than piped, for the same EPIPE reason as above.
+          tmp="$(mktemp -d)"
+          dpkg-deb -x "$deb" "$tmp"
+          adb_bin="$tmp/opt/Ether/resources/$payload/adb"
+          [ -f "$adb_bin" ] || { echo "::error::$payload/adb is not where the app looks for it"; exit 1; }
+          magic="$(od -An -tx1 -N4 "$adb_bin" | tr -d ' \n')"
+          machine="$(od -An -tx1 -j18 -N2 "$adb_bin" | tr -d ' \n')"
+          echo "== $payload/adb: magic $magic e_machine $machine"
+          [ "$magic" = "7f454c46" ] || { echo "::error::the bundled adb is not an ELF"; exit 1; }
+          [ "$machine" = "b700" ] || { echo "::error::the bundled adb is not aarch64 (e_machine $machine)"; exit 1; }
           echo "== arm64 deb verified"
 
       - uses: actions/upload-artifact@v4

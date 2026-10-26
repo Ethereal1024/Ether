@@ -1,23 +1,25 @@
-# electron-builder.arm64.yml — the arm64 deb, and the one thing it deliberately lacks.
+# electron-builder.arm64.yml — the arm64 deb, and the two things that differ on it.
 #
 # `extends` merges this over electron-builder.yml, so everything about the app stays in
-# one file and only the difference lives here.  Two choices are load-bearing:
+# one file and only the difference lives here.  Three choices are load-bearing:
 #
-#   1. `deb.recommends` names the distribution's adb, not a dependency: Google publishes
-#      Linux platform-tools for x86_64 only, so there is no arm64 `adb` to bundle and none
-#      to download at run time (`hostCanRunPlatformTools` in `src/main/platform.ts`).  A
-#      `Depends` would refuse to unpack on a machine that already has an SDK adb in
-#      `$PATH`; a Recommends is what Debian means by "the app is better with this".
+#   1. `deb.recommends` still names the distribution's adb, even though the package now
+#      carries an aarch64 one of its own (`resources/platform-tools/linux-arm64/`, built
+#      from Debian's pinned packages by `bin/cli.mjs --fetch-adb --arch arm64`).  The
+#      bundled copy needs glibc 2.35 or newer; on an older arm64 host the app probes it,
+#      finds it will not start, and falls back to whatever the machine has — which is
+#      exactly what a Recommends is for.  It is not a `Depends` because the package must
+#      install and run where the user already has an SDK adb in `$PATH`.
 #      `libappindicator3-1` is repeated because setting the list replaces fpm's default
 #      for the deb target — the tray must not lose its dependency on this architecture
 #      only.
 #   2. `linux.target` is NOT set here.  `extends` merges arrays by concatenation, so a
 #      target list would still build the parent's AppImage as well; the target is
 #      selected on the command line instead (`npm run dist:linux:arm64`).
-#
-# What is *not* in this file is as deliberate: no `--fetch-adb` step, because the copy it
-# would fetch is x86_64 Linux binaries and `Adb.fetchInto` refuses to put them there on
-# this architecture.  The package therefore ships without `resources/platform-tools/`.
+#   3. The fetch step is in that script, not here: it asks the CLI for `--arch arm64`, so
+#      the payload that lands in `resources/platform-tools/` is an aarch64 one.  A plain
+#      `--fetch-adb` on an x64 packaging host would fetch Google's x86_64 Linux binaries,
+#      and `Adb.fetchInto` refuses to write those for an arm64 target.
 extends: ./electron-builder.yml
 
 deb:

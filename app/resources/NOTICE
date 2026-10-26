@@ -39,6 +39,46 @@ machine where the bundled binary will not start, still ends with a working link.
 That copy lives in the app's own data directory, and deleting the directory
 removes it completely.
 
+Linux arm64: an adb assembled from Debian's packages
+----------------------------------------------------
+Google publishes Linux platform-tools for x86_64 only, so the arm64 package
+cannot use the archive above.  The adb it ships is assembled at package time
+from Debian's own builds, unmodified except that only the files the app needs are
+taken out of each package:
+
+    resources/platform-tools/linux-arm64/adb
+    resources/platform-tools/linux-arm64/lib/   (18 shared libraries)
+    resources/platform-tools/linux-arm64/NOTICE.txt
+
+`src/main/adb-arm64.ts` pins every package by version and SHA-256, and
+`bin/cli.mjs --fetch-adb --arch arm64` downloads exactly those, refuses a hash
+that does not match, and copies `adb` plus every library its ELF names.  Nothing
+is patched or relinked; the binaries are the ones Debian signed and published.
+
+| what | pinned package | licence of the shipped files |
+| --- | --- | --- |
+| `adb`, libbase/libcutils/liblog/libziparchive, libcrypto/libssl | `adb` 34.0.5, `android-lib*` (bookworm-backports) | Apache-2.0 (AOSP) |
+| `libprotobuf.so.32` | `libprotobuf32` 3.21.12 | BSD-3-Clause |
+| `libusb-1.0.so.0` | `libusb-1.0-0` 1.0.26 | LGPL-2.1-or-later |
+| `libudev.so.1` | `libudev1` 254.26 | LGPL-2.1-or-later |
+| `libbrotli*.so.1` | `libbrotli1` 1.0.9 | MIT |
+| `libcap.so.2` | `libcap2` 2.66 | BSD-3-Clause |
+| `liblz4.so.1` | `liblz4-1` 1.9.4 | BSD-2-Clause |
+| `libzstd.so.1` | `libzstd1` 1.5.4 | BSD-3-Clause |
+| `libz.so.1` | `zlib1g` 1.2.13 | Zlib |
+| `libstdc++.so.6`, `libgcc_s.so.1` | `libstdc++6`, `libgcc-s1` 12.3.0 (Ubuntu 22.04) | GPL-3.0-or-later with the GCC Runtime Library Exception |
+
+Those packages' full copyright and licence texts are the files Debian ships at
+`/usr/share/doc/<package>/copyright` inside each `.deb`; the exact versions and
+download URLs are in `app/src/main/adb-arm64.ts`, so the text can be fetched
+again from the same place.  The LGPL libraries are shipped unmodified and
+dynamically loaded, which is what the LGPL asks for; a build that replaces them
+can do so by dropping its own copies into that `lib/` directory.
+
+The assembled payload needs glibc 2.35 or newer.  On an older arm64 host the app
+probes it, finds it will not start, and asks for the distribution's adb package
+instead of launching it; in that case nothing from this section is executed.
+
 Electron, TypeScript, electron-builder: build-time dependencies
 --------------------------------------------------------------
 Declared as `devDependencies` in `package.json`; Electron's own notices ship with

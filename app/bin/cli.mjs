@@ -13,7 +13,7 @@
 //   node bin/cli.mjs --bench --seconds 30 --window 4096
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, openSync, readFileSync } from 'node:fs';
+import { existsSync, openSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -32,7 +32,7 @@ Usage:
   node bin/cli.mjs --bench [--seconds N] [--window N] [--json]
   node bin/cli.mjs --selftest                      unit + loopback interop (no device)
   node bin/cli.mjs --reap [--json]                 clear leftovers (reverses / orphans / pid files)
-  node bin/cli.mjs --fetch-adb [--plat P] [--force]  put our own adb copy in resources/ (packaging step)
+  node bin/cli.mjs --fetch-adb [--plat P] [--arch A] [--force]  put our own adb copy in resources/ (packaging step)
   node bin/cli.mjs --serve                         internal: resident service (--up starts it; do not run by hand)
 
 Options:
@@ -43,6 +43,7 @@ Options:
   --fast            --up skips the device self-check and the post-up verification
   --keep            --bench leaves the channel up afterwards
   --plat P          --fetch-adb: linux | darwin | win32 | all (default: this platform)
+  --arch A          --fetch-adb: x64 | arm64 (default: this machine's, x64 when cross-fetching)
   --force           --fetch-adb: fetch again even when the copy is already there
   --help
 `;
@@ -59,7 +60,7 @@ const opt = {
   json: false, dataDir: undefined, elf: undefined,
   timeout: 25, seconds: 10, window: 1024, frame: 1200,
   fast: false, keep: false, logs: 0, help: false,
-  plat: undefined, force: false,
+  plat: undefined, arch: undefined, force: false,
 };
 
 for (let i = 0; i < argv.length; i++) {
@@ -79,6 +80,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--fetch-adb') opt.fetchAdb = true;
   else if (a === '--force') opt.force = true;
   else if (a === '--plat') opt.plat = next();
+  else if (a === '--arch') opt.arch = next();
   else if (a === '--json') opt.json = true;
   else if (a === '--fast') opt.fast = true;
   else if (a === '--keep') opt.keep = true;
@@ -105,18 +107,19 @@ async function load(name) {
 }
 
 async function loadAll() {
-  const [controller, tunnelMod, adbMod, relayMod, benchMod, messagesMod, portsMod, platformMod] =
+  const [controller, tunnelMod, adbMod, adbArm64Mod, relayMod, benchMod, messagesMod, portsMod, platformMod] =
     await Promise.all([
       load('controller.js'),
       load('tunnel.js'),
       load('adb.js'),
+      load('adb-arm64.js'),
       load('relay.js'),
       load('bench.js'),
       load('messages.js'),
       load('ports.js'),
       load('platform.js'),
     ]);
-  return { controller, tunnelMod, adbMod, relayMod, benchMod, messagesMod, portsMod, platformMod };
+  return { controller, tunnelMod, adbMod, adbArm64Mod, relayMod, benchMod, messagesMod, portsMod, platformMod };
 }
 
 /** The fixed key order of §13.8, so the JSON reads the same every time. */
@@ -423,10 +426,17 @@ async function cmdDown(mods) {
  * download.  It downloads platform-tools from Google and keeps only `adb` (plus the DLLs
  * the Windows build loads), which is also why the tree it writes into is not committed:
  * the fetch is one command, and `npm run dist` runs it.
+ *
+ * Linux arm64 is the one target Google has no archive for, so it takes the other branch:
+ * `fetchArm64Adb` assembles the same kind of thing out of Debian's pinned `.deb` files
+ * (`src/main/adb-arm64.ts`) into `platform-tools/linux-arm64/`.  Both branches end in the
+ * same place — an `adb` the package runs itself, with no step asked of the machine — which
+ * is the point: arm64 should behave like every other platform, not like a special case.
  */
 async function cmdFetchAdb(mods) {
   const { Adb } = mods.adbMod;
-  const { currentPlat, bundledAdbDir } = mods.platformMod;
+  const { fetchArm64Adb, hasArm64Payload } = mods.adbArm64Mod;
+  const { currentPlat, bundledAdbDir, bundledPlatformToolsDir } = mods.platformMod;
   const dir = process.env.ETHER_RESOURCES ?? path.join(appRoot, 'resources');
 
   const want = opt.plat ?? currentPlat();
@@ -434,37 +444,66 @@ async function cmdFetchAdb(mods) {
   for (const p of plats) {
     if (!['linux', 'darwin', 'win32'].includes(p)) die(`--plat must be linux, darwin, win32 or all, not ${p}`);
   }
+  if (opt.arch !== undefined && !['x64', 'arm64'].includes(opt.arch)) {
+    die(`--arch must be x64 or arm64, not ${opt.arch}`);
+  }
 
   const done = [];
   const skipped = [];
   for (const plat of plats) {
-    const into = bundledAdbDir(dir, plat);
-    process.stderr.write(`[adb] fetching platform-tools for ${plat} into ${into}\n`);
+    // This machine's architecture unless asked otherwise; a cross-fetch (another platform,
+    // or `--plat all`) means the x86_64 build, because that is what runs there.
+    const arch = opt.arch ?? (plat === currentPlat() ? process.arch : 'x64');
+    const into = bundledAdbDir(dir, plat, arch);
+    process.stderr.write(`[adb] fetching platform-tools for ${plat} ${arch} into ${into}\n`);
     let exe;
     try {
-      exe = await Adb.fetchInto({
-        plat,
-        dir: into,
-        log: (l) => process.stderr.write(`${l}\n`),
-        force: opt.force,
-      });
+      exe = hasArm64Payload(plat, arch)
+        ? await fetchArm64Adb({ dir: into, log: (l) => process.stderr.write(`${l}\n`) })
+        : await Adb.fetchInto({
+            plat,
+            arch,
+            dir: into,
+            log: (l) => process.stderr.write(`${l}\n`),
+            force: opt.force,
+          });
     } catch (e) {
-      // `arch`: no platform-tools archive exists that this machine can run (Linux on
-      // anything but x86_64).  That is not a failed packaging step — a package built here
-      // must carry *no* adb rather than a foreign one, and the distribution's is what the
-      // app will use — so the fetch is skipped and the build goes on.
+      // `arch`: no adb can be shipped for this target at all (Linux on anything but x86_64
+      // and aarch64).  That is not a failed packaging step — a package built here must
+      // carry *no* adb rather than a foreign one, and the distribution's is what the app
+      // will use — so the fetch is skipped and the build goes on.  Every other code
+      // (download, payload, tool) is a real failure and must stop the build.
       if (e?.code !== 'arch') throw e;
-      process.stderr.write(`[adb] ${e.message}\n[adb] ${plat}: skipped, the package ships no adb\n`);
-      skipped.push(plat);
+      process.stderr.write(`[adb] ${e.message}\n[adb] ${plat} ${arch}: skipped, the package ships no adb\n`);
+      skipped.push(`${plat} ${arch}`);
       continue;
     }
-    done.push({ plat, exe });
+    done.push({ plat, arch, exe });
+  }
+
+  // A package carries the payload of the target it is built for, and nothing else.
+  // `resources/` is copied into the package wholesale, so what a *previous* build for
+  // another architecture left behind would ride along — 11 MiB of a binary that cannot
+  // execute on the machine installing it.  Only the directories this run fetched are kept,
+  // which also makes a skipped target mean what it says: the package ships no adb at all.
+  const keep = new Set(done.map((d) => bundledPlatformToolsDir(d.plat, d.arch)));
+  const tools = path.join(dir, 'platform-tools');
+  let entries = [];
+  try {
+    entries = readdirSync(tools, { withFileTypes: true });
+  } catch {
+    /* nothing fetched yet: there is nothing to prune */
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || keep.has(e.name)) continue;
+    rmSync(path.join(tools, e.name), { recursive: true, force: true });
+    process.stderr.write(`[adb] removed platform-tools/${e.name} (built for another target)\n`);
   }
 
   if (opt.json) process.stdout.write(`${JSON.stringify(done, null, 2)}\n`);
   else {
-    for (const d of done) process.stdout.write(`${d.plat.padEnd(6)}: ${d.exe}\n`);
-    for (const p of skipped) process.stdout.write(`${p.padEnd(6)}: skipped (no platform-tools for this machine)\n`);
+    for (const d of done) process.stdout.write(`${`${d.plat} ${d.arch}`.padEnd(12)}: ${d.exe}\n`);
+    for (const p of skipped) process.stdout.write(`${p.padEnd(12)}: skipped (no adb can ship for this target)\n`);
   }
   return 0;
 }

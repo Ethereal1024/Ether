@@ -21,7 +21,7 @@
     "start": "electron .",
     "dist": "npm run build && node bin/cli.mjs --fetch-adb && electron-builder --publish never",
     "dist:linux": "npm run build && node bin/cli.mjs --fetch-adb --plat linux && electron-builder --linux --publish never",
-    "dist:linux:arm64": "npm run build && electron-builder --config electron-builder.arm64.yml --linux deb --arm64 --publish never",
+    "dist:linux:arm64": "npm run build && node bin/cli.mjs --fetch-adb --plat linux --arch arm64 && electron-builder --config electron-builder.arm64.yml --linux deb --arm64 --publish never",
     "dist:mac": "npm run build && node bin/cli.mjs --fetch-adb --plat darwin && electron-builder --mac --publish never",
     "dist:win": "npm run build && node bin/cli.mjs --fetch-adb --plat win32 && electron-builder --win --publish never"
   },

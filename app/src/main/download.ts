@@ -63,7 +63,11 @@ export async function downloadToFile(
         res.on('error', (e) => out.destroy(e));
         out.on('error', reject);
       });
-      req.on('error', (e) => reject(new DownloadError(`${label}: ${e.message}`)));
+      // `destroy(err)` fires this handler with the *same* error the timeout made, so a
+      // DownloadError is passed through rather than labelled twice ("x: x: timed out").
+      req.on('error', (e) =>
+        reject(e instanceof DownloadError ? e : new DownloadError(`${label}: ${e.message}`)),
+      );
       req.setTimeout(timeout, () => {
         req.destroy(new DownloadError(`${label}: timed out after ${timeout / 1000}s`));
       });

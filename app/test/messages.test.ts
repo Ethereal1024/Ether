@@ -78,15 +78,16 @@ test('the three negative cases say what to do next (§3.4 rows 1-3)', () => {
 });
 
 test('the arm64 refusal names a package, never a privileged command', () => {
-  // Google ships Linux platform-tools for x86_64 only, so on another architecture the
-  // only adb that runs is the distribution's.  The sentence names the *package*: handing
-  // out `sudo …` is the escalation this app exists to avoid (escalation.test.ts scans for
-  // it, so a command here would fail that file rather than this one).
-  assert.match(t('adbNeedsDistro'), /x86_64 only/);
+  // The app now carries an aarch64 adb, so this sentence is only reached when that copy
+  // cannot start (glibc older than 2.35) — a machine whose answer is its distribution's
+  // package.  The sentence names the *package*: handing out `sudo …` is the escalation
+  // this app exists to avoid (escalation.test.ts scans for it, so a command here would
+  // fail that file rather than this one).
+  assert.match(t('adbNeedsDistro'), /glibc 2\.35/);
   assert.match(t('adbNeedsDistro'), /adb package/);
   assert.doesNotMatch(t('adbNeedsDistro'), /\bsudo\b|\bpkexec\b|\bapt-get\b/);
   // It must not read as the transient failure: "try again" would be a lie about a
-  // machine whose architecture does not change.
+  // machine whose libc does not change.
   assert.doesNotMatch(t('adbNeedsDistro'), /try again/);
 });
 

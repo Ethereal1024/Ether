@@ -48,28 +48,46 @@ npm run dev            # build + launch the window
 npm run dist           # electron-builder -> app/release/
 ```
 
-`npm run dist*` fetches Google's `platform-tools` first (`node bin/cli.mjs
---fetch-adb --plat <this platform>`) and copies it into
-`app/resources/platform-tools/<plat>/`, so a built package carries the adb it
-needs and never asks the machine to install one — that directory is
-`.gitignore`d, and the fetch is one command when you want it by hand:
+`npm run dist*` puts the adb the package will run into
+`app/resources/platform-tools/<dir>/` before it packs anything
+(`node bin/cli.mjs --fetch-adb --plat <this platform> [--arch <x64|arm64>]`), so
+a built package carries the adb it needs and never asks the machine to install
+one. That directory is `.gitignore`d, and the fetch is one command when you want
+it by hand:
 
 ```sh
 cd app
-node bin/cli.mjs --fetch-adb            # this platform; add --plat all for the other two
-node bin/cli.mjs --fetch-adb --force    # fetch again over an existing copy
+node bin/cli.mjs --fetch-adb                  # this platform; add --plat all for the other two
+node bin/cli.mjs --fetch-adb --arch arm64     # the aarch64 payload for Linux
+node bin/cli.mjs --fetch-adb --force          # fetch again over an existing copy
 ```
 
-The one package built without that step is the arm64 deb (`npm run
-dist:linux:arm64`): Google publishes Linux platform-tools for **x86_64 only**, so
-there is no aarch64 `adb` to bundle and none to download. That package ships no
-`platform-tools/` at all, declares `Recommends: adb` instead, and the app says so
-in the window (`adbNeedsDistro`) rather than launching a binary that cannot run
-here. On every other architecture the bundled copy is the one that runs.
+There are two sources because there are two cases, and both end in the same
+place: an `adb` the package runs itself, on the machine's own CPU.
+
+- **Every target Google ships.** The payload is Google's `platform-tools` zip,
+  reduced to `adb` (plus the two DLLs on Windows):
+  `resources/platform-tools/linux/`, `/darwin/`, `/win32/`.
+- **Linux on aarch64.** Google publishes Linux platform-tools for **x86_64
+  only**, so `npm run dist:linux:arm64` assembles an aarch64 `adb` instead:
+  Debian's pinned `android-platform-tools` `.deb` and the shared libraries it
+  needs, fetched and SHA-256-checked per `src/main/adb-arm64.ts`, written to
+  `resources/platform-tools/linux-arm64/` (adb + 18 libraries + a `NOTICE.txt`).
+
+A fetch keeps only the directory it was asked for and deletes any other
+architecture's payload, so a package carries its own adb and nothing that cannot
+execute on the machine installing it.
+
+The assembled aarch64 payload needs **glibc 2.35 or newer** — Debian 12, Ubuntu
+22.04+, Jetson/Armbian/Raspberry Pi OS 64-bit, which is where arm64 Linux lives.
+On an older host the app probes the binary, sees it will not start, and says so
+in the window (`adbNeedsDistro`) rather than launching something broken; that is
+the one case that asks for the distribution's package. The deb also declares
+`Recommends: adb`, so `apt install ./ether_*_arm64.deb` pulls one in there.
 
 The app still prefers an adb that is already on the machine (`$ADB`, `$PATH`,
-the Android SDK directories) and falls back to its own copy, and then to a
-run-time download; see `app/resources/NOTICE`.
+the Android SDK directories), falls back to its own copy, and then to a run-time
+download; see `app/resources/NOTICE`.
 
 The C relay must exist before the interop suite runs, or those cases silently
 skip:
@@ -104,9 +122,11 @@ unsigned installers to the GitHub release for that tag:
 
 Three runners because electron-builder cannot cross-build two of them. The arm64
 deb is the exception: it is plain JavaScript, so it is packed on the same x64
-runner and only the architecture flag differs — and that job checks the package
-as *text* (`Architecture: arm64`, `Recommends: adb`, and no `platform-tools/`
-inside). A `verify` job runs first on Linux: it refuses a tag that disagrees with
+runner and only the architecture flag differs. That job checks the package as
+*text* (`Architecture: arm64`, `Recommends: adb`, the payload
+`platform-tools/linux-arm64/adb` with its libraries, the ELF header at offset 18
+saying aarch64, and no `platform-tools/linux/` inside). A `verify` job runs first
+on Linux: it refuses a tag that disagrees with
 `app/package.json`'s `version`, checks the icon and the tablet ELF are really
 there, and runs `scripts/run-tests.sh` (which insists on *zero skips*, so a run
 that quietly stopped building the C relay cannot pass). The first job to attach a
@@ -122,10 +142,11 @@ Authenticode certificate here:
   anyway). The installer never asks for admin — `perMachine: false` and
   `allowElevation: false` are pinned in `app/electron-builder.yml`.
 - **Linux**: nothing to bypass. `dpkg -i` the deb, or `chmod +x` the AppImage.
-  The arm64 deb is the one package that carries no adb (see above), so install
-  your distribution's `adb` package first — `apt install adb`, `dnf install
-  android-tools`, `pacman -S android-tools`. Without one the window says
-  "No adb for this machine…" and points at exactly that.
+  Every package carries its own adb, the arm64 deb included. That one is
+  assembled from Debian's packages and needs glibc 2.35 or newer; on an older
+  host the window says "No adb can run here…" and points at the distribution's
+  package (`apt install adb`, `dnf install android-tools`, `pacman -S
+  android-tools`).
 
 ### Cutting a release
 
