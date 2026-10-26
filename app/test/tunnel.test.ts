@@ -10,7 +10,7 @@
 // given back, and a tablet that will not answer costs a measurement nothing.
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -19,6 +19,7 @@ import { Adb } from '../src/main/adb.js';
 import { currentPlat } from '../src/main/platform.js';
 import { writeState } from '../src/main/reap.js';
 import { Tunnel, parseRelayProbe, tabletRelayProbe } from '../src/main/tunnel.js';
+import { rmTemp } from './tmp.js';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const stub = path.join(appRoot, 'test', 'fixtures', 'fake-adb.sh');
@@ -75,7 +76,7 @@ async function harness(
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmTemp(dir);
   };
 
   const logs: string[] = [];

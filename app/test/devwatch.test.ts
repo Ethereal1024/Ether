@@ -11,12 +11,13 @@
 // Nothing needs adb, a tablet or a window: the stand-in server is the adb server.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { adbServerTarget, DeviceWatch } from '../src/main/devwatch.js';
+import { rmTemp } from './tmp.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -270,6 +271,6 @@ test('a unix-socket server is watched the same way', { skip: process.platform ==
     watch.stop();
     for (const c of clients) c.destroy();
     await new Promise<void>((r) => server.close(() => r()));
-    rmSync(dir, { recursive: true, force: true });
+    rmTemp(dir);
   }
 });

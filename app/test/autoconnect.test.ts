@@ -13,7 +13,7 @@
 // in CI at all.
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +23,7 @@ import { Controller, type Status } from '../src/main/controller.js';
 import { currentPlat } from '../src/main/platform.js';
 import { detectSunshinePorts, sunshineConfPath, sunshineRunning } from '../src/main/ports.js';
 import { AutoConnectAttempt, type Settings } from '../src/main/startup.js';
+import { rmTemp } from './tmp.js';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const stub = path.join(appRoot, 'test', 'fixtures', 'fake-adb.sh');
@@ -198,7 +199,7 @@ test('an app that starts before the tablet waits, then dials by itself', { skip:
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmTemp(dir);
   }
 });
 
@@ -302,7 +303,7 @@ test('the adb server pushing the device list is what dials, with no tick in sigh
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmTemp(dir);
   }
 });
 
@@ -412,7 +413,7 @@ test('a press that could not dial leaves the wait standing, and the tablet still
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmTemp(dir);
   }
 });
 
@@ -514,7 +515,7 @@ test('the app\u2019s own dial that raised nothing keeps the wait, and the tablet
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmTemp(dir);
   }
 });
 
@@ -565,6 +566,6 @@ test('the switch off at launch leaves the app quiet, however long the tablet tak
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmTemp(dir);
   }
 });
