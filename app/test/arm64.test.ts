@@ -49,6 +49,11 @@ import {
   hostCanRunPlatformTools,
 } from '../src/main/platform.js';
 
+/** Windows has no POSIX mode bits: a file there reports 0o666, so `findAdb`'s
+ *  "the copy we ship has to be executable" test cannot be exercised on it — and on a
+ *  Windows host the app never asks for a Linux payload anyway. */
+const posixOnly = process.platform === 'win32' ? 'needs POSIX executable bits' : false;
+
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const repoRoot = path.resolve(appRoot, '..');
 /** A file of this app, read the way a test reads a claim: whole, with CRLF normalised
@@ -194,7 +199,7 @@ test('elfFitsHost refuses only what it can prove is foreign', () => {
 
 // ── what the app does with such a copy ───────────────────────────────────────
 
-test('findAdb takes the arm64 payload on arm64 and skips the x86_64 one', async () => {
+test('findAdb takes the arm64 payload on arm64 and skips the x86_64 one', { skip: posixOnly }, async () => {
   const dir = tmpDir();
   try {
     const arm = resources(dir, 'linux-arm64', EM_AARCH64);
@@ -324,8 +329,9 @@ test('elfNeeded answers, or says nothing, but never guesses', () => {
   assert.deepEqual(elfNeeded(Buffer.from('#!/bin/sh\nexec adb "$@"\n')), []);
   assert.deepEqual(elfNeeded(elfHead(EM_AARCH64)), [], 'a 20-byte header carries no program headers');
   // A real dynamically linked executable is the parser's one honest test.  On macOS and
-  // Windows `/bin/sh` is a Mach-O or a PE, and "no opinion" is the right answer there.
-  const sh = readFileSync('/bin/sh');
+  // Windows `/bin/sh` is a Mach-O or a PE — or, on Windows, not there at all — and "no
+  // opinion" is the right answer there.
+  const sh = existsSync('/bin/sh') ? readFileSync('/bin/sh') : Buffer.alloc(0);
   const machine = elfMachine(sh.subarray(0, 20));
   if (machine === EM_X86_64 || machine === EM_AARCH64) {
     assert.ok(elfNeeded(sh).includes('libc.so.6'), 'a glibc executable names libc.so.6');
