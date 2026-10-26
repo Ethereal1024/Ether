@@ -26,6 +26,7 @@ export type MsgKey =
   | 'udpFail'
   | 'adbMissing'
   | 'adbConflict'
+  | 'adbNeedsDistro'
   | 'abiUnsupported'
   | 'elfNoExec'
   | 'ready'
@@ -55,6 +56,12 @@ const MESSAGES: Record<MsgKey, string> = {
   // what failed and leaves the retry to the app's own polling and the Connect button.
   adbMissing: 'adb could not be started: neither the copy shipped with the app nor one on this machine works, and the download failed',
   adbConflict: 'A different adb server version is running; it must be restarted (other sessions will drop)',
+  // The one machine where the bundled copy is not the answer: Google publishes Linux
+  // platform-tools for x86_64 only, so an arm64 build ships no adb and can download none.
+  // The fix is the distribution's package, and it is a *package*, not a privileged
+  // command this app hands out — `test/escalation.test.ts` fails if a sentence starts
+  // naming one.
+  adbNeedsDistro: 'No adb for this machine: Google ships Linux platform-tools for x86_64 only. Install your distribution\'s adb package',
   abiUnsupported: 'Device ABI {abi} is not supported',
   elfNoExec: 'The device-side program cannot run (maybe /data/local/tmp is mounted noexec)',
   ready: 'Wired channel is up',

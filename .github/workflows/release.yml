@@ -2,10 +2,17 @@
 # GitHub release for that tag.
 #
 #   AppImage + deb : Linux x86_64   (ubuntu-latest)
+#   deb            : Linux arm64    (ubuntu-latest, cross-packed)
 #   dmg            : macOS arm64    (macos-latest)
 #   NSIS .exe      : Windows x64    (windows-latest)
 #
-# All three are UNSIGNED — this project has no Developer ID and no Authenticode
+# The arm64 deb is the one package that ships *no* adb: Google publishes Linux
+# platform-tools for x86_64 only, so it Recommends the distribution's instead.  It
+# is packed on the same x64 runner (nothing here is native code), and the job that
+# does it asserts the three claims a deb makes as text — Architecture, Recommends,
+# and the absence of `platform-tools/`.
+#
+# All four are UNSIGNED — this project has no Developer ID and no Authenticode
 # certificate, and saying so here is the point: a signed-looking release that is
 # not signed is worse than one that admits it.
 #   macOS: Gatekeeper blocks the first launch. On macOS 15+ the right-click ->
@@ -140,6 +147,74 @@ jobs:
           body: |
             Unsigned builds. macOS: first launch is blocked by Gatekeeper — `xattr -cr /Applications/Ether.app`.
             Windows: SmartScreen warns — More info -> Run anyway (the installer never asks for admin).
+            Linux arm64: the `arm64.deb` carries no adb — Google publishes Linux platform-tools for x86_64 only — so install your distribution's `adb` package first.
+
+  # The arm64 deb. Packed on an x64 runner because nothing in it is native code — the
+  # tablet-side relay is already aarch64 and the host relay is TypeScript — so the only
+  # architecture-dependent thing left is the *adb*, and that is the difference this job
+  # exists to prove:
+  #
+  #   * Architecture: arm64
+  #   * Recommends: adb (the distribution's — Google publishes Linux platform-tools for
+  #     x86_64 only, so there is none to bundle and none to download)
+  #   * no resources/platform-tools/ at all: an x86_64 adb on an arm64 machine is a file
+  #     that exists and cannot run, which is exactly the state this package avoids
+  #
+  # It `needs: linux` because that job creates the release; attaching to a release that
+  # does not exist yet is a 422, not a race worth having.
+  linux-arm64:
+    runs-on: ubuntu-latest
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app deps
+        working-directory: app
+        run: npm ci
+
+      - name: Build the arm64 deb (no bundled adb)
+        working-directory: app
+        run: npm run dist:linux:arm64
+
+      # A deb states its architecture, its recommendations and its file list as text, so
+      # all three are read here without running anything.  The icon assertion is not
+      # decoration: a missing icon set is the silent failure of 0.2.5, where every size
+      # the theme indexes was absent and the launcher drew a placeholder.
+      - name: The deb says arm64, recommends the distro's adb, and carries no adb
+        run: |
+          set -euo pipefail
+          deb="$(ls app/release/*_arm64.deb)" || { echo "::error::no arm64 deb was produced"; exit 1; }
+          echo "== $deb ($(du -h "$deb" | cut -f1))"
+          arch="$(dpkg-deb -f "$deb" Architecture)"
+          [ "$arch" = "arm64" ] || { echo "::error::Architecture is '$arch', expected arm64"; exit 1; }
+          rec="$(dpkg-deb -f "$deb" Recommends)"
+          echo "== Recommends: $rec"
+          echo "$rec" | tr ',' '\n' | grep -qw adb || { echo "::error::the package does not Recommend adb"; exit 1; }
+          if dpkg-deb -c "$deb" | grep -q 'platform-tools'; then
+            echo "::error::the arm64 package carries platform-tools; no copy of it can run there"
+            exit 1
+          fi
+          dpkg-deb -c "$deb" | grep -q 'hicolor/256x256/apps/ether' || { echo "::error::the icon set is missing from the package"; exit 1; }
+          echo "== arm64 deb verified"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ether-linux-arm64
+          path: app/release/*_arm64.deb
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/release/*_arm64.deb
+          # No `body:` here on purpose: the linux job sets the one release body, and a
+          # second writer would make the text depend on which job finished last.
 
   mac:
     runs-on: macos-latest

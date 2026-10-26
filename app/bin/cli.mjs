@@ -436,20 +436,36 @@ async function cmdFetchAdb(mods) {
   }
 
   const done = [];
+  const skipped = [];
   for (const plat of plats) {
     const into = bundledAdbDir(dir, plat);
     process.stderr.write(`[adb] fetching platform-tools for ${plat} into ${into}\n`);
-    const exe = await Adb.fetchInto({
-      plat,
-      dir: into,
-      log: (l) => process.stderr.write(`${l}\n`),
-      force: opt.force,
-    });
+    let exe;
+    try {
+      exe = await Adb.fetchInto({
+        plat,
+        dir: into,
+        log: (l) => process.stderr.write(`${l}\n`),
+        force: opt.force,
+      });
+    } catch (e) {
+      // `arch`: no platform-tools archive exists that this machine can run (Linux on
+      // anything but x86_64).  That is not a failed packaging step — a package built here
+      // must carry *no* adb rather than a foreign one, and the distribution's is what the
+      // app will use — so the fetch is skipped and the build goes on.
+      if (e?.code !== 'arch') throw e;
+      process.stderr.write(`[adb] ${e.message}\n[adb] ${plat}: skipped, the package ships no adb\n`);
+      skipped.push(plat);
+      continue;
+    }
     done.push({ plat, exe });
   }
 
   if (opt.json) process.stdout.write(`${JSON.stringify(done, null, 2)}\n`);
-  else for (const d of done) process.stdout.write(`${d.plat.padEnd(6)}: ${d.exe}\n`);
+  else {
+    for (const d of done) process.stdout.write(`${d.plat.padEnd(6)}: ${d.exe}\n`);
+    for (const p of skipped) process.stdout.write(`${p.padEnd(6)}: skipped (no platform-tools for this machine)\n`);
+  }
   return 0;
 }
 

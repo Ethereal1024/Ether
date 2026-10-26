@@ -60,6 +60,13 @@ node bin/cli.mjs --fetch-adb            # this platform; add --plat all for the 
 node bin/cli.mjs --fetch-adb --force    # fetch again over an existing copy
 ```
 
+The one package built without that step is the arm64 deb (`npm run
+dist:linux:arm64`): Google publishes Linux platform-tools for **x86_64 only**, so
+there is no aarch64 `adb` to bundle and none to download. That package ships no
+`platform-tools/` at all, declares `Recommends: adb` instead, and the app says so
+in the window (`adbNeedsDistro`) rather than launching a binary that cannot run
+here. On every other architecture the bundled copy is the one that runs.
+
 The app still prefers an adb that is already on the machine (`$ADB`, `$PATH`,
 the Android SDK directories) and falls back to its own copy, and then to a
 run-time download; see `app/resources/NOTICE`.
@@ -85,21 +92,25 @@ python3 tools/ascii-shot.py <png> [x y w h] [cols]   # read a shot as text
 
 ## Releases
 
-`.github/workflows/release.yml` fires on a `vX.Y.Z` tag push and attaches three
+`.github/workflows/release.yml` fires on a `vX.Y.Z` tag push and attaches four
 unsigned installers to the GitHub release for that tag:
 
 | artifact | platform | built on |
 | --- | --- | --- |
 | `Ether-*.AppImage`, `ether_*_amd64.deb` | Linux x86_64 | `ubuntu-latest` |
+| `ether_*_arm64.deb` | Linux arm64 | `ubuntu-latest` (cross-packed) |
 | `Ether-*-arm64.dmg` | macOS arm64 | `macos-latest` |
 | `Ether Setup *.exe` | Windows x64 (NSIS) | `windows-latest` |
 
-Three runners because electron-builder cannot cross-build two of them. A `verify`
-job runs first on Linux: it refuses a tag that disagrees with
+Three runners because electron-builder cannot cross-build two of them. The arm64
+deb is the exception: it is plain JavaScript, so it is packed on the same x64
+runner and only the architecture flag differs — and that job checks the package
+as *text* (`Architecture: arm64`, `Recommends: adb`, and no `platform-tools/`
+inside). A `verify` job runs first on Linux: it refuses a tag that disagrees with
 `app/package.json`'s `version`, checks the icon and the tablet ELF are really
 there, and runs `scripts/run-tests.sh` (which insists on *zero skips*, so a run
 that quietly stopped building the C relay cannot pass). The first job to attach a
-file creates the release, which is why the other two `needs` it.
+file creates the release, which is why the others `need` it.
 
 All three platforms are **unsigned** — there is no Developer ID and no
 Authenticode certificate here:
@@ -111,6 +122,10 @@ Authenticode certificate here:
   anyway). The installer never asks for admin — `perMachine: false` and
   `allowElevation: false` are pinned in `app/electron-builder.yml`.
 - **Linux**: nothing to bypass. `dpkg -i` the deb, or `chmod +x` the AppImage.
+  The arm64 deb is the one package that carries no adb (see above), so install
+  your distribution's `adb` package first — `apt install adb`, `dnf install
+  android-tools`, `pacman -S android-tools`. Without one the window says
+  "No adb for this machine…" and points at exactly that.
 
 ### Cutting a release
 

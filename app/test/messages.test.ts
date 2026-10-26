@@ -1,4 +1,4 @@
-// messages.test.ts — the sentence catalogue is frozen at 14 keys (§3.4, §13.8).
+// messages.test.ts — the sentence catalogue is frozen at 15 keys (§3.4, §13.8).
 //
 // Ether is an English-language program: the catalogue is one language, held here,
 // and the UI never invents prose.  Every message a user can see is one line, shaped
@@ -13,11 +13,12 @@ import { allKeys, t, uiLabels } from '../src/main/messages.js';
 
 const CJK = /[\u3400-\u9fff]/;
 
-test('the catalogue is exactly the 14 frozen keys', () => {
+test('the catalogue is exactly the 15 frozen keys', () => {
   assert.deepEqual(allKeys().sort(), [
     'abiUnsupported',
     'adbConflict',
     'adbMissing',
+    'adbNeedsDistro',
     'elfNoExec',
     'hintTapHost',
     'noDevice',
@@ -30,7 +31,7 @@ test('the catalogue is exactly the 14 frozen keys', () => {
     'udpFail',
     'unauthorized',
   ]);
-  assert.equal(allKeys().length, 14);
+  assert.equal(allKeys().length, 15);
 });
 
 test('every sentence is English: no Chinese survives in the app the user reads', () => {
@@ -74,6 +75,19 @@ test('the three negative cases say what to do next (§3.4 rows 1-3)', () => {
   assert.match(t('noDevice'), /USB/);
   assert.match(t('unauthorized'), /Allow USB debugging/);
   assert.match(t('offline'), /unplug and replug/);
+});
+
+test('the arm64 refusal names a package, never a privileged command', () => {
+  // Google ships Linux platform-tools for x86_64 only, so on another architecture the
+  // only adb that runs is the distribution's.  The sentence names the *package*: handing
+  // out `sudo …` is the escalation this app exists to avoid (escalation.test.ts scans for
+  // it, so a command here would fail that file rather than this one).
+  assert.match(t('adbNeedsDistro'), /x86_64 only/);
+  assert.match(t('adbNeedsDistro'), /adb package/);
+  assert.doesNotMatch(t('adbNeedsDistro'), /\bsudo\b|\bpkexec\b|\bapt-get\b/);
+  // It must not read as the transient failure: "try again" would be a lie about a
+  // machine whose architecture does not change.
+  assert.doesNotMatch(t('adbNeedsDistro'), /try again/);
 });
 
 test('variables are substituted, not printed raw', () => {

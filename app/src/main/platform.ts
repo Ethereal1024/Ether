@@ -5,7 +5,7 @@
 // belongs here instead.
 
 import { execFile, execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 // The rule's own path is declared where the op that writes it is: this module prints it,
@@ -101,24 +101,115 @@ export function bundledAdbPath(resourcesDir: string, plat: Plat): string {
   return path.join(bundledAdbDir(resourcesDir, plat), adbExeName(plat));
 }
 
-/** First candidate that exists and is executable; undefined => caller must download. */
+/**
+ * First candidate that exists and is executable; undefined => caller must download.
+ *
+ * The copy we ship is the one candidate whose provenance is known, so it is also the one
+ * that is checked against this machine: a source tree keeps whatever a package built on
+ * *another* architecture left in `resources/platform-tools/<plat>/`, and handing an
+ * x86_64 `adb` to `execFile` on an arm64 machine is ENOEXEC with no explanation.  An adb
+ * the *user* installed is never second-guessed — if it is broken, the version probe says
+ * so, and it is not ours to judge.
+ */
 export function findAdb(
   env: NodeJS.ProcessEnv,
   plat: Plat,
   resourcesDir?: string,
 ): string | undefined {
+  const shipped = resourcesDir ? path.normalize(bundledAdbPath(resourcesDir, plat)) : undefined;
   for (const c of adbCandidates(env, plat, resourcesDir)) {
     try {
       const st = statSync(c);
       if (!st.isFile()) continue;
       if (plat === 'win32') return c;
       // eslint-disable-next-line no-bitwise
-      if ((st.mode & 0o111) !== 0) return c;
+      if ((st.mode & 0o111) === 0) continue;
+      if (shipped !== undefined && path.normalize(c) === shipped) {
+        const head = elfHeadFromFile(c);
+        if (head && !elfFitsHost(head, plat, process.arch)) continue;
+      }
+      return c;
     } catch {
       /* keep looking */
     }
   }
   return undefined;
+}
+
+/** The first 20 bytes of a file — an ELF header — or nothing when it cannot be read. */
+export function elfHeadFromFile(p: string): Uint8Array | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, 'r');
+    const buf = Buffer.alloc(20);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, n);
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+// ── can this machine run the platform-tools we would ship? ────────────────────
+//
+// Google publishes Linux platform-tools for x86_64 only: there is no aarch64 `adb` to
+// carry in an arm64 package, and a download would fail the same way.  So that package
+// ships no adb at all and names the distribution's instead (`messages.adbNeedsDistro`);
+// everywhere else the copy we ship is the one that runs — Windows on ARM emulates x64,
+// and the darwin archive is universal.
+
+/** ELF `e_machine` for a Node architecture, for the three hosts this project can meet. */
+export function elfMachineForArch(arch: string): number | undefined {
+  switch (arch) {
+    case 'x64':
+      return 0x3e; // EM_X86_64
+    case 'arm64':
+      return 0xb7; // EM_AARCH64
+    case 'arm':
+      return 0x28; // EM_ARM
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * `e_machine` out of an ELF header, or `undefined` when these bytes are not one.  Twenty
+ * bytes are enough — magic, `EI_DATA`, and the 16-bit field at offset 18 — which is what
+ * lets a caller answer from a 20-byte read instead of loading a 10 MiB binary to look at
+ * its second half.
+ */
+export function elfMachine(head: Uint8Array): number | undefined {
+  if (head.length < 20) return undefined;
+  if (head[0] !== 0x7f || head[1] !== 0x45 || head[2] !== 0x4c || head[3] !== 0x46) return undefined; // "\x7fELF"
+  const lo = head[18]!;
+  const hi = head[19]!;
+  return head[5] === 2 ? (lo << 8) | hi : (hi << 8) | lo; // EI_DATA 2 = big endian
+}
+
+/** Does Google publish a platform-tools build that a host of `plat`/`arch` can execute? */
+export function hostCanRunPlatformTools(plat: Plat, arch: string): boolean {
+  if (plat !== 'linux') return true;
+  return arch === 'x64';
+}
+
+/**
+ * Does this executable head belong to the machine that is about to run it?
+ *
+ * Three answers are deliberately `true`: another platform (not this machine's question),
+ * an architecture we cannot name, and bytes that are not an ELF at all (a wrapper script,
+ * or `adb.exe`).  What is refused is what can be *proved* foreign — because the
+ * alternative is `execFile` failing with ENOEXEC and no explanation of where that file
+ * came from.
+ */
+export function elfFitsHost(head: Uint8Array, plat: Plat, arch: string): boolean {
+  if (plat !== 'linux') return true;
+  const got = elfMachine(head);
+  if (got !== undefined) {
+    const want = elfMachineForArch(arch);
+    if (want !== undefined && got !== want) return false;
+  }
+  return hostCanRunPlatformTools(plat, arch);
 }
 
 export function fileExists(p: string): boolean {

@@ -17,7 +17,16 @@ import { execFile } from 'node:child_process';
 import { chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { downloadToFile } from './download.js';
-import { adbExeName, bundledAdbPath, currentPlat, findAdb, type Plat } from './platform.js';
+import {
+  adbExeName,
+  bundledAdbPath,
+  currentPlat,
+  elfFitsHost,
+  elfHeadFromFile,
+  findAdb,
+  hostCanRunPlatformTools,
+  type Plat,
+} from './platform.js';
 import { extractZip } from './zip.js';
 
 export type DevState = 'device' | 'unauthorized' | 'offline' | 'no permissions' | 'unknown';
@@ -114,6 +123,16 @@ function platformToolsUrl(plat: Plat): string {
   return `https://dl.google.com/android/repository/platform-tools-latest-${tag}.zip`;
 }
 
+/**
+ * Why there is nothing to hand this machine, in one sentence for the two places that have
+ * to say it (`ensure` before it downloads, `fetchInto` before it packs): Google ships
+ * Linux platform-tools for x86_64 only, so on another architecture both the download and
+ * the bundled copy are dead ends, and the distribution's adb is the only one that runs.
+ */
+function noPlatformToolsFor(plat: Plat): string {
+  return `no platform-tools build exists for ${plat} on ${process.arch}: Google publishes Linux platform-tools for x86_64 only, so install your distribution's adb`;
+}
+
 export class Adb {
   readonly exe: string;
   readonly version: string;
@@ -136,6 +155,11 @@ export class Adb {
       return new Adb(o, found, version);
     }
 
+    // Nothing on this machine and nothing we can fetch: on an architecture Google
+    // publishes no Linux platform-tools for, downloading would only spend a minute to
+    // fail at the last step.  Refuse with a reason the caller can turn into a sentence.
+    if (!hostCanRunPlatformTools(o.plat, process.arch)) throw new AdbError(noPlatformToolsFor(o.plat), 'arch');
+
     o.log(`[adb] not found on this machine; downloading platform-tools into ${o.dataDir}`);
     const version = await Adb.downloadAndInstall(o);
     const exe = path.join(o.dataDir, 'platform-tools', adbExeName(o.plat));
@@ -154,6 +178,15 @@ export class Adb {
     try {
       const st = await stat(p);
       if (!st.isFile()) return undefined;
+      // A source tree keeps the copy a package built on *this* machine left behind, and a
+      // package for another architecture must never carry one.  Handing a foreign ELF to
+      // `execFile` is ENOEXEC and no explanation, so the header is read first and the file
+      // is skipped exactly as if it were not there — the distro's adb is then what runs.
+      const head = o.plat === 'linux' ? elfHeadFromFile(p) : undefined;
+      if (head && !elfFitsHost(head, o.plat, process.arch)) {
+        o.log(`[adb] ${p} is built for another machine; ignoring it`);
+        return undefined;
+      }
       if (o.plat !== 'win32' && (st.mode & 0o111) === 0) await chmod(p, 0o755);
       return p;
     } catch {
@@ -175,6 +208,13 @@ export class Adb {
    * carrying them would multiply the size of every package for nothing.
    */
   static async fetchInto(o: { plat: Plat; dir: string; log: (l: string) => void; force?: boolean }): Promise<string> {
+    // Packing for the machine we are on: refuse before the download, not after it.  The
+    // arm64 deb is built without this call at all (`npm run dist:linux:arm64`), so what
+    // this guards is the `--plat all` that would otherwise fetch x86_64 Linux binaries
+    // into an arm64 package and report success.
+    if (o.plat === currentPlat() && !hostCanRunPlatformTools(o.plat, process.arch)) {
+      throw new AdbError(noPlatformToolsFor(o.plat), 'arch');
+    }
     const exe = adbExeName(o.plat);
     const target = path.join(o.dir, exe);
     if (!o.force) {

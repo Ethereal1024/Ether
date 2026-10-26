@@ -95,7 +95,7 @@ const SUPPORTED_ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'];
 export class Controller {
   readonly dataDir: string;
   readonly plat: Plat;
-  /** adb discovery failure, if any: `adbMissing` / `adbConflict`. */
+  /** adb discovery failure, if any: `adbMissing` / `adbConflict` / `adbNeedsDistro`. */
   adbError?: MsgKey;
   adb?: Adb;
   ports?: SunshinePorts;
@@ -192,7 +192,10 @@ export class Controller {
       this.adbError = undefined;
       return true;
     } catch (e) {
-      this.adbError = e instanceof AdbError && e.code === 'conflict' ? 'adbConflict' : 'adbMissing';
+      // `arch` is not "adb is missing and a retry might find it": no build of it exists for
+      // this machine, so it gets its own sentence and its own remedy (the distro's).
+      const code = e instanceof AdbError ? e.code : '';
+      this.adbError = code === 'conflict' ? 'adbConflict' : code === 'arch' ? 'adbNeedsDistro' : 'adbMissing';
       this.pushLog(`[app] ${(e as Error).message}`);
       this.last = { state: 'error', message: t(this.adbError), messageKey: this.adbError };
       return false;
