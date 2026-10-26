@@ -195,12 +195,23 @@ jobs:
           [ "$arch" = "arm64" ] || { echo "::error::Architecture is '$arch', expected arm64"; exit 1; }
           rec="$(dpkg-deb -f "$deb" Recommends)"
           echo "== Recommends: $rec"
-          echo "$rec" | tr ',' '\n' | grep -qw adb || { echo "::error::the package does not Recommend adb"; exit 1; }
-          if dpkg-deb -c "$deb" | grep -q 'platform-tools'; then
+          grep -qw adb <<< "${rec//,/ }" || { echo "::error::the package does not Recommend adb"; exit 1; }
+          # Read the file list *once*, into a variable, and match with herestrings.  The
+          # obvious `dpkg-deb -c "$deb" | grep -q …` is a trap under `pipefail`: grep
+          # exits on its first match, tar's stdout gets EPIPE, and the pipeline reports
+          # failure *after* the match was found.  That is exactly how 0.2.7's arm64 job
+          # went red ("the icon set is missing") for a package that had all nine sizes:
+          # the log above it said `tar: stdout: write error`.
+          listing="$(dpkg-deb -c "$deb")"
+          if grep -q 'platform-tools' <<< "$listing"; then
             echo "::error::the arm64 package carries platform-tools; no copy of it can run there"
             exit 1
           fi
-          dpkg-deb -c "$deb" | grep -q 'hicolor/256x256/apps/ether' || { echo "::error::the icon set is missing from the package"; exit 1; }
+          grep -q 'hicolor/256x256/apps/ether' <<< "$listing" || {
+            echo "::error::the icon set is missing from the package"
+            grep hicolor <<< "$listing" || echo "(no hicolor entries at all)"
+            exit 1
+          }
           echo "== arm64 deb verified"
 
       - uses: actions/upload-artifact@v4

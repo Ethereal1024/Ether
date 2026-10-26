@@ -281,6 +281,14 @@ test('release.yml builds the arm64 deb and checks what is inside it', () => {
   assert.match(head, /Recommends/);
   assert.match(head, /platform-tools/, 'the job has to assert the package carries none');
   assert.match(head, /softprops\/action-gh-release/);
+
+  // The listing is read once and matched with herestrings.  `dpkg-deb -c "$deb" | grep -q`
+  // is the shape that fails *under `pipefail`*: grep exits on its first match, tar's stdout
+  // gets EPIPE, and the pipeline reports failure after the match was already found.  That
+  // is how 0.2.7's arm64 job went red with "the icon set is missing" for a package that
+  // had every size — the line above it read `tar: stdout: write error`.
+  assert.match(head, /listing="\$\(dpkg-deb -c "\$deb"\)"/, 'the file list is read once, not re-streamed');
+  assert.doesNotMatch(head, /^\s+dpkg-deb -c "\$deb" \| grep/m, 'grep -q on a pipe fails on EPIPE under pipefail');
 });
 
 test('the file header lists every artifact the workflow produces', () => {
